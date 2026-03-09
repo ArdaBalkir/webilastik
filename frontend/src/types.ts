@@ -1,0 +1,106 @@
+// ── DZI metadata ─────────────────────────────────────────────────────────────
+export interface DziMeta {
+  width: number;
+  height: number;
+  tileSize: number;
+  overlap: number;
+  format: string; // "jpeg" | "png"
+  maxLevel: number; // ceil(log2(max(width, height))) — full-resolution level index
+}
+
+// ── Project model (browser-owned, serialised to JSON) ────────────────────────
+export interface Label {
+  id: number; // 1-based
+  name: string;
+  color: string; // CSS hex, e.g. "#ff0000"
+}
+
+export interface Stroke {
+  labelId: number;
+  level: number; // DZI level whose coordinate space the points are in
+  points: Array<[number, number]>; // [x, y] in level-scaled image pixels
+}
+
+export interface Project {
+  dziUrl: string; // URL of the .dzip file
+  dziName: string; // name of the .dzi entry inside the zip (no .dzi suffix)
+  workLevel: number | null; // null = auto (maxLevel)
+  labels: Label[];
+  strokes: Stroke[];
+}
+
+// ── Feature configuration ────────────────────────────────────────────────────
+export interface FeatureConfig {
+  gaussianSmoothing: boolean;
+  laplacianOfGaussian: boolean;
+  gaussianGradientMagnitude: boolean;
+  differenceOfGaussians: boolean;
+  structureTensorEigenvalues: boolean;
+  hessianOfGaussianEigenvalues: boolean;
+  scales: number[];
+}
+
+export const DEFAULT_FEATURE_CONFIG: FeatureConfig = {
+  gaussianSmoothing: true,
+  laplacianOfGaussian: true,
+  gaussianGradientMagnitude: true,
+  differenceOfGaussians: false,
+  structureTensorEigenvalues: false,
+  hessianOfGaussianEigenvalues: true,
+  scales: [0.3, 0.7, 1.0, 1.6, 3.5, 5.0],
+};
+
+// ── API request / response shapes ────────────────────────────────────────────
+export interface DziInfoResponse {
+  name: string;
+  width: number;
+  height: number;
+  tileSize: number;
+  overlap: number;
+  format: string;
+  maxLevel: number;
+}
+
+export interface TrainRequest {
+  dzip_url: string;
+  dzi_name: string;
+  level: number;
+  strokes: Array<{
+    label: number;
+    points: Array<[number, number]>;
+  }>;
+  features: {
+    filters: string[];
+    scales: number[];
+  };
+}
+
+export interface TrainResponse {
+  classifier_id: string;
+  num_classes: number;
+}
+
+export interface ExportRequest {
+  classifier_id: string;
+  dzip_url: string;
+  dzi_name: string;
+  level: number;
+  features: {
+    filters: string[];
+    scales: number[];
+  };
+  output_url?: string; // if omitted → browser download; if set → PUT to that URL
+}
+
+export interface ExportStatus {
+  status: "pending" | "running" | "done" | "error";
+  progress?: number; // 0..1
+  error?: string;
+}
+
+// ── Auth ─────────────────────────────────────────────────────────────────────
+export interface SessionInfo {
+  session_id: string;
+  status: "pending" | "running" | "done" | "error";
+  url?: string; // compute server URL once running
+}

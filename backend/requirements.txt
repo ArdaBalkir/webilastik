@@ -1,0 +1,29 @@
+# ── Core ─────────────────────────────────────────────────────────────────────
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+pydantic>=2.7.0
+
+# ── HTTP ─────────────────────────────────────────────────────────────────────
+requests>=2.31.0
+
+# ── Image / numerics ─────────────────────────────────────────────────────────
+numpy>=1.26.0
+Pillow>=10.3.0
+scipy>=1.13.0
+
+# ── Auth ─────────────────────────────────────────────────────────────────────
+PyJWT[crypto]>=2.8.0
+
+# ── Feature extraction (fast) ────────────────────────────────────────────────
+# fastfilters is only available via conda-forge:
+#   conda install -c conda-forge fastfilters
+# If unavailable, scipy fallback is used automatically.
+# fastfilters
+
+# ── GPU classifier (optional) ─────────────────────────────────────────────────
+# RAPIDS cuML — install via conda or pip wheel from https://rapids.ai/start.html
+# Must match your CUDA version.  If absent, scikit-learn is used.
+# cuml-cu12
+
+# ── CPU classifier fallback ───────────────────────────────────────────────────
+scikit-learn>=1.4.2

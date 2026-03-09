@@ -1,0 +1,24 @@
+# Excluded from repo
+webilastik/
+dzip_helper.ts
+project-plan.md
+storage.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Node
+frontend/node_modules/
+frontend/dist/
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db
