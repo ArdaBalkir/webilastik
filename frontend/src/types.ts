@@ -96,8 +96,68 @@ export interface ExportStatus {
   status: "pending" | "running" | "done" | "error";
   progress?: number; // 0..1
   error?: string;
+  url?: string;
 }
 
+// ── Source listing ────────────────────────────────────────────────────────────
+export interface SourceEntry {
+  name: string;
+  object_url: string;
+  bytes: number | null;
+}
+
+// ── Batch export ──────────────────────────────────────────────────────────────
+export interface BatchExportRequest {
+  classifier_id: string;
+  p_source: string;
+  output_dir: string;
+  features: { filters: string[]; scales: number[] };
+}
+
+export interface BatchExportStatus {
+  status: "pending" | "running" | "done" | "error";
+  progress: number;
+  total: number;
+  done: number;
+  failed: Array<{ name: string; error: string }>;
+  current?: string;
+  error?: string;
+}
+
+// ── Headless run ──────────────────────────────────────────────────────────────
+export interface HeadlessRequest {
+  t_source: string;
+  annotations: Array<{
+    dzip_url: string;
+    strokes: Array<{ label: number; points: Array<[number, number]> }>;
+  }>;
+  features: { filters: string[]; scales: number[] };
+  level: number;
+  p_source: string;
+  output_dir: string;
+}
+// ── EBRAINS data-proxy ───────────────────────────────────────────────────────────
+export interface BucketListEntry {
+  name: string;
+  role: "administrator" | "editor" | "viewer" | null;
+  is_public: boolean;
+}
+export interface StorageObject {
+  name: string;
+  bytes: number;
+  last_modified?: string | null;
+}
+export interface StorageDir {
+  subdir: string;
+  bytes: number | null;
+  last_modified?: string | null;
+}
+export interface StorageApiResponse {
+  objects: (StorageObject | StorageDir)[];
+  container: string;
+  prefix: string | null;
+  marker: string | null;
+}
 // ── Auth ─────────────────────────────────────────────────────────────────────
 export interface SessionInfo {
   session_id: string;

@@ -1,5 +1,13 @@
 import { signal, computed } from "@preact/signals";
-import type { Label, Stroke, FeatureConfig, DziMeta, Project } from "./types";
+import type {
+  Label,
+  Stroke,
+  FeatureConfig,
+  DziMeta,
+  Project,
+  SourceEntry,
+  BatchExportStatus,
+} from "./types";
 import { DEFAULT_FEATURE_CONFIG } from "./types";
 
 // ── App-level reactive state ─────────────────────────────────────────────────
@@ -61,6 +69,37 @@ export const workLevel = computed(() => {
 
 // The DZI level that the current classifier was trained at
 export const trainedLevel = signal<number | null>(null);
+
+// ── URL param-seeded values (set once at startup by app.tsx) ───────────────
+export const tSourceUrl = signal<string>(""); // ?t_source= training dir / DZIP URL
+export const pSourceUrl = signal<string>(""); // ?p_source= export dir URL
+export const outputDirUrl = signal<string>(""); // ?output_dir= destination dir URL
+
+// ── Training source browser ───────────────────────────────────────────────
+export const trainingSources = signal<SourceEntry[]>([]);
+export const selectedTrainingSources = signal<Set<string>>(new Set()); // object_url set
+export const trainingSourcesLoading = signal<boolean>(false);
+export const trainingSourcesError = signal<string>("");
+
+// Per-image strokes keyed by object_url — persists annotations across image switches
+export const strokesBySource = signal<Record<string, Stroke[]>>({});
+
+/** Switch the active image for annotation. Saves + restores strokes. */
+export function switchTrainingSource(objectUrl: string) {
+  // Save current strokes under current dziUrl
+  if (dziUrl.value) {
+    strokesBySource.value = {
+      ...strokesBySource.value,
+      [dziUrl.value]: strokes.value,
+    };
+  }
+  // Restore strokes for new source
+  strokes.value = strokesBySource.value[objectUrl] ?? [];
+}
+
+// ── Batch export state ────────────────────────────────────────────────────
+export const batchJobId = signal<string | null>(null);
+export const batchStatus = signal<BatchExportStatus | null>(null);
 
 // ── Project serialization ────────────────────────────────────────────────────
 

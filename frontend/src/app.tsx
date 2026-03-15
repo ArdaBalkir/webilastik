@@ -9,13 +9,37 @@ import { LabelPanel } from "./components/LabelPanel";
 import { FeaturePanel } from "./components/FeaturePanel";
 import { ControlBar } from "./components/ControlBar";
 import { DataPanel } from "./components/DataPanel";
+import { SourceBrowser } from "./components/SourceBrowser";
+import { ExportPanel } from "./components/ExportPanel";
 import type { TrainRequest } from "./types";
+
+/** Parse URL query params once at startup into state signals. */
+function readUrlParams() {
+  const p = new URLSearchParams(window.location.search);
+  const tSrc = p.get("t_source");
+  const pSrc = p.get("p_source");
+  const outDir = p.get("output_dir");
+  const token = p.get("token");
+  const server = p.get("server");
+  if (tSrc) state.tSourceUrl.value = tSrc;
+  if (pSrc) state.pSourceUrl.value = pSrc;
+  if (outDir) state.outputDirUrl.value = outDir;
+  if (token) state.bearerToken.value = token;
+  if (server) state.serverUrl.value = server;
+  // If t_source looks like a single DZIP (not a dir), seed dziUrl
+  if (tSrc && tSrc.endsWith(".dzip")) state.dziUrl.value = tSrc;
+}
 
 export function App() {
   const viewerContainerRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<DziViewer | null>(null);
   const brushRef = useRef<BrushingCanvas | null>(null);
   const predRef = useRef<PredictionOverlay | null>(null);
+
+  // Read URL params once
+  useEffect(() => {
+    readUrlParams();
+  }, []);
 
   // Initialise canvas objects once the container div mounts
   useEffect(() => {
@@ -32,22 +56,16 @@ export function App() {
       state.strokes.value = [...state.strokes.value, stroke];
     };
 
+    // Auto-load t_source DZIP if it was set via URL param
+    const initialUrl = state.dziUrl.value;
+    if (initialUrl) {
+      handleLoadImage(initialUrl);
+    }
+
     return () => {
       viewer.destroy();
       pred.destroy();
     };
-  }, []);
-
-  // Keep viewer tile level capped to chosen working resolution
-  useEffect(() => {
-    return state.workLevel.subscribe((level: number | null) => {
-      viewerRef.current?.setWorkLevel(level);
-      // Resolution changed — trained classifier is now stale, clear overlay
-      state.classifierId.value = null;
-      state.trainedLevel.value = null;
-      predRef.current?.setLockedLevel(null);
-      predRef.current?.clearCache();
-    });
   }, []);
 
   // Keep viewer tile level capped to chosen working resolution
@@ -228,14 +246,15 @@ export function App() {
 
   return (
     <div class="app-root">
-      <div class="viewer-area" ref={viewerContainerRef} />
       <aside class="sidebar">
-        <h1 class="app-title">Webilastik 2.0</h1>
+        <SourceBrowser onLoad={handleLoadImage} />
         <DataPanel onLoad={handleLoadImage} />
         <ControlBar onTrain={handleTrain} />
         <LabelPanel />
         <FeaturePanel />
+        <ExportPanel />
       </aside>
+      <div class="viewer-area" ref={viewerContainerRef} />
     </div>
   );
 }

@@ -6,6 +6,11 @@ import type {
   ExportStatus,
   SessionInfo,
   FeatureConfig,
+  BucketListEntry,
+  StorageApiResponse,
+  SourceEntry,
+  BatchExportRequest,
+  BatchExportStatus,
 } from "./types";
 
 export class ApiClient {
@@ -131,6 +136,21 @@ export class ApiClient {
     a.click();
     URL.revokeObjectURL(a.href);
   }
+
+  async listSources(dirUrl: string): Promise<SourceEntry[]> {
+    return this.request(
+      "GET",
+      `/list-sources?url=${encodeURIComponent(dirUrl)}`,
+    );
+  }
+
+  async startBatchExport(req: BatchExportRequest): Promise<{ job_id: string }> {
+    return this.request("POST", "/batch-export", req);
+  }
+
+  async getBatchExportStatus(jobId: string): Promise<BatchExportStatus> {
+    return this.request("GET", `/batch-export/${jobId}`);
+  }
 }
 
 // ── Session allocator client ─────────────────────────────────────────────────
@@ -208,3 +228,35 @@ export function featureConfigToFilters(fc: FeatureConfig): string[] {
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
+
+// ── EBRAINS data-proxy — called directly from the browser ────────────────────────
+
+const DATA_PROXY_BASE = "https://data-proxy.ebrains.eu/api/v1";
+
+async function dpFetch<T>(url: string, token: string): Promise<T> {
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok)
+    throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
+  return res.json() as Promise<T>;
+}
+
+export const dataProxy = {
+  listBuckets(token: string): Promise<BucketListEntry[]> {
+    return dpFetch(`${DATA_PROXY_BASE}/buckets`, token);
+  },
+
+  listObjects(
+    token: string,
+    bucket: string,
+    prefix = "",
+  ): Promise<StorageApiResponse> {
+    const u = new URL(
+      `${DATA_PROXY_BASE}/buckets/${encodeURIComponent(bucket)}`,
+    );
+    u.searchParams.set("delimiter", "/");
+    if (prefix) u.searchParams.set("prefix", prefix);
+    return dpFetch(u.toString(), token);
+  },
+};

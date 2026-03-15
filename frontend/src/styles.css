@@ -27,7 +27,7 @@ body {
 .sidebar {
   flex: 0 0 260px;
   background: #1e1e1e;
-  border-left: 1px solid #333;
+  border-right: 1px solid #333;
   overflow-y: auto;
   padding: 8px 10px 20px;
   display: flex;
@@ -286,4 +286,175 @@ select {
   color: #ddd;
   padding: 2px 4px;
   font-size: 11px;
+}
+
+/* ── Dialog ──────────────────────────────────────────────────────────────── */
+.dialog-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.dialog {
+  background: #252525;
+  border: 1px solid #444;
+  border-radius: 6px;
+  padding: 14px;
+  width: 340px;
+  max-height: 70vh;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 13px;
+}
+
+.bucket-list {
+  list-style: none;
+  overflow-y: auto;
+  max-height: 220px;
+  border: 1px solid #333;
+  border-radius: 3px;
+  background: #1a1a1a;
+}
+
+.bucket-item {
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bucket-item:hover { background: #2a3a38; }
+
+.bucket-prefix {
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100px;
+}
+
+/* ── Status / error text ─────────────────────────────────────────────────── */
+.status {
+  font-size: 11px;
+  color: #9ecfc8;
+  margin: 2px 0;
+}
+.status.error { color: #ff8888; }
+.hint { font-size: 10px; color: #666; }
+
+/* ── Collapsible panels ──────────────────────────────────────────────────── */
+.collapsible { padding: 0; overflow: hidden; }
+
+.collapsible-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: #252525;
+  border: none;
+  color: #ccc;
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+  border-radius: 4px;
+}
+.collapsible-header:hover { background: #2e2e2e; }
+
+.chevron { font-size: 9px; color: #666; }
+
+.collapsible-body {
+  background: #252525;
+  border-radius: 0 0 4px 4px;
+  padding: 8px 10px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+/* ── Source browser list ─────────────────────────────────────────────────── */
+.source-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 200px;
+  overflow-y: auto;
+  border: 1px solid #333;
+  border-radius: 3px;
+  background: #1a1a1a;
+  padding: 2px;
+}
+
+.source-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border-radius: 3px;
+  cursor: pointer;
+  font-size: 11px;
+}
+.source-item:hover { background: #2a3a38; }
+.source-item.active {
+  background: #0d2e2b;
+  outline: 1px solid #3dd6c0;
+}
+
+.source-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: #ddd;
+}
+
+.source-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: #666;
+  white-space: nowrap;
+}
+
+.dot-annotated {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3dd6c0;
+}
+
+/* ── Batch progress bar ──────────────────────────────────────────────────── */
+.batch-progress { display: flex; flex-direction: column; gap: 4px; }
+
+.progress-bar-bg {
+  height: 6px;
+  background: #333;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: #3dd6c0;
+  border-radius: 3px;
+  transition: width 0.3s ease;
 }
