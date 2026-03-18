@@ -188,7 +188,7 @@ def _build_sbatch_script(
 #SBATCH --export=NONE
 
 # ── Environment ───────────────────────────────────────────────────────────────
-source {HPC_ENV_ACTIVATE}
+mamba activate webilastik2
 export PYTHONUNBUFFERED=1
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK

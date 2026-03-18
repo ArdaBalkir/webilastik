@@ -330,8 +330,8 @@ def build_prediction_dzip(
                     logger.info("  tiles %d/%d  %.1f/s  ETA %.0fs", n, total, rate, eta)
 
     tile_coords = [(c, r) for r in range(num_rows) for c in range(num_cols)]
-    # Use min(workers, total, 64) — beyond ~64 threads I/O contention outweighs gains
-    actual_workers = min(workers, total, 64)
+    # Cap at 128 concurrent tile threads per image — beyond that connections are bottlenecked
+    actual_workers = min(workers, total, 128)
     logger.info("  predicting %d tiles with %d workers", total, actual_workers)
 
     with ThreadPoolExecutor(max_workers=actual_workers) as pool:
@@ -402,33 +402,53 @@ def run(
     logger.info("Found %d images to process", total)
 
     # ── 3. Predict + upload each image ────────────────────────────────────────
+    # Run images in parallel: split worker budget across concurrent images so
+    # total thread count stays ≤ workers (e.g. 3 images × 42 threads each).
+    n_parallel = min(total, max(1, workers // 16))  # at least 16 tile threads per image
+    workers_per_image = max(16, workers // n_parallel)
+
     logger.info("=" * 60)
-    logger.info("PHASE 3 — BATCH EXPORT  (%d workers per image)", workers)
+    logger.info(
+        "PHASE 3 — BATCH EXPORT  (%d images parallel, %d tile workers each)",
+        n_parallel,
+        workers_per_image,
+    )
     logger.info("=" * 60)
     output_base = output_dir.rstrip("/")
     failed: list[str] = []
+    import threading
 
-    for idx, src in enumerate(sources, 1):
+    failed_lock = threading.Lock()
+
+    def _process_image(idx: int, src: dict) -> None:
         src_url = src["object_url"]
         src_name = src["name"]
         dzi_name = src_name.replace(".dzip", "").replace(".zip", "")
         dest_url = f"{output_base}/{src_name}"
-
         logger.info("[%d/%d] %s", idx, total, src_name)
         tmpdir = None
         try:
             tmpdir, dzip_path = build_prediction_dzip(
-                src_url, dzi_name, clf, features, token, workers
+                src_url, dzi_name, clf, features, token, workers_per_image
             )
             logger.info("  uploading → %s", dest_url)
             upload_dzip(dzip_path, dest_url, token)
-            logger.info("  ✓ done")
+            logger.info("  ✓ done  [%d/%d]", idx, total)
         except Exception as e:
-            logger.error("  ✗ FAILED: %s", e)
-            failed.append(src_name)
+            logger.error("  ✗ FAILED %s: %s", src_name, e)
+            with failed_lock:
+                failed.append(src_name)
         finally:
             if tmpdir:
                 shutil.rmtree(tmpdir, ignore_errors=True)
+
+    with ThreadPoolExecutor(max_workers=n_parallel) as img_pool:
+        img_futs = [
+            img_pool.submit(_process_image, idx, src)
+            for idx, src in enumerate(sources, 1)
+        ]
+        for f in as_completed(img_futs):
+            f.result()  # re-raise unexpected executor errors
 
     # ── 4. Summary ────────────────────────────────────────────────────────────
     elapsed = time.time() - t0
