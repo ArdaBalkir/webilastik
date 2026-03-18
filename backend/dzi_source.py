@@ -239,6 +239,56 @@ class DzipSource:
         return list(self._entries.keys())
 
 
+class LocalDzipSource:
+    """
+    Reads a DZIP that has already been downloaded to a local file.
+    Same interface as DzipSource (find_dzi / get_tile / get_bytes) but
+    uses Python's zipfile module — no HTTP, no auth, pure disk I/O.
+    Thread-safe: ZipFile opened per-call to avoid locking.
+    """
+
+    def __init__(self, path: "pathlib.Path"):
+        import pathlib
+
+        self.path = pathlib.Path(path)
+        self._dzi_meta: Optional[DziMeta] = None
+        self._dzi_name: Optional[str] = None
+
+    def get_bytes(self, name: str) -> bytes:
+        import zipfile as _zf
+
+        with _zf.ZipFile(self.path) as zf:
+            return zf.read(name)
+
+    def find_dzi(self) -> Tuple[str, DziMeta]:
+        if self._dzi_meta is not None:
+            return self._dzi_name, self._dzi_meta  # type: ignore[return-value]
+        import zipfile as _zf
+
+        with _zf.ZipFile(self.path) as zf:
+            names = zf.namelist()
+        dzi_key = next(
+            (k for k in names if k.endswith(".dzi") and "/" not in k),
+            None,
+        ) or next((k for k in names if k.endswith(".dzi")), None)
+        if dzi_key is None:
+            raise ValueError(f"No .dzi file found in {self.path}")
+        xml_str = self.get_bytes(dzi_key).decode("utf-8")
+        meta = _parse_dzi_xml(xml_str)
+        name = dzi_key.removesuffix(".dzi")
+        self._dzi_name = name
+        self._dzi_meta = meta
+        return name, meta
+
+    def get_tile(
+        self, dzi_name: str, level: int, col: int, row: int, fmt: str
+    ) -> np.ndarray:
+        path = f"{dzi_name}_files/{level}/{col}_{row}.{fmt}"
+        data = self.get_bytes(path)
+        img = Image.open(io.BytesIO(data)).convert("RGB")
+        return np.asarray(img, dtype=np.uint8)
+
+
 # ── DZI XML parsing ───────────────────────────────────────────────────────────
 
 

@@ -62,7 +62,7 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 
 from .classifier import Classifier
-from .dzi_source import DzipSource
+from .dzi_source import DzipSource, LocalDzipSource
 from .encoding import encode_prediction_png
 from .features import extract_features
 
@@ -259,6 +259,70 @@ def train(
     return clf
 
 
+# ── Prefetch ──────────────────────────────────────────────────────────────────
+
+
+def prefetch_sources(
+    sources: list[dict],
+    dest_dir: pathlib.Path,
+    token: Optional[str],
+    workers: int,
+) -> dict[str, pathlib.Path]:
+    """
+    Download all source DZIPs in parallel to dest_dir.
+    Returns {src_name: local_path}.
+    """
+    import requests
+
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    results: dict[str, pathlib.Path] = {}
+    lock = __import__("threading").Lock()
+
+    def _download(src: dict) -> None:
+        name = src["name"]
+        url = src["object_url"]
+        dest = dest_dir / name
+        if dest.exists():
+            logger.info("  [prefetch] %s already cached, skipping", name)
+            with lock:
+                results[name] = dest
+            return
+        logger.info("  [prefetch] downloading %s ...", name)
+        sess = _make_session(4, token)
+        # data-proxy: get pre-signed S3 URL first
+        if token and "data-proxy.ebrains.eu" in url:
+            r = sess.get(url + "?redirect=false", timeout=30)
+            r.raise_for_status()
+            try:
+                data = r.json()
+                pre = (
+                    data.get("url")
+                    or data.get("URL")
+                    or next(iter(data.values()), None)
+                )
+                if isinstance(pre, str) and pre.startswith("http"):
+                    url = pre
+                    sess = requests.Session()  # no auth for S3
+            except Exception:
+                pass
+        with sess.get(url, stream=True, timeout=60) as r:
+            r.raise_for_status()
+            total_bytes = int(r.headers.get("content-length", 0))
+            with open(dest, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB chunks
+                    f.write(chunk)
+        logger.info("  [prefetch] %s done (%s bytes)", name, f"{dest.stat().st_size:,}")
+        with lock:
+            results[name] = dest
+
+    dl_workers = min(len(sources), workers, 16)  # cap at 16 parallel downloads
+    with ThreadPoolExecutor(max_workers=dl_workers) as pool:
+        futs = [pool.submit(_download, src) for src in sources]
+        for f in as_completed(futs):
+            f.result()
+    return results
+
+
 # ── Prediction / DZIP building ────────────────────────────────────────────────
 
 
@@ -269,9 +333,11 @@ def build_prediction_dzip(
     features: dict,
     token: Optional[str],
     workers: int,
+    local_path: Optional[pathlib.Path] = None,
 ) -> tuple[pathlib.Path, pathlib.Path]:
     """
     Predict all tiles at full resolution, write to tmpdir, pack as DZIP.
+    If local_path is provided, reads tiles from it (no network) — use after prefetch.
     Returns (tmpdir, dzip_path).  Caller must shutil.rmtree(tmpdir).
     """
     import threading
@@ -279,9 +345,12 @@ def build_prediction_dzip(
     filters: list[str] = features["filters"]
     scales: list[float] = features["scales"]
 
-    src = DzipSource(
-        dzip_url, session=_make_session(workers, token), bearer_token=token
-    )
+    if local_path is not None:
+        src: "DzipSource | LocalDzipSource" = LocalDzipSource(local_path)
+    else:
+        src = DzipSource(
+            dzip_url, session=_make_session(workers, token), bearer_token=token
+        )
     _, meta = src.find_dzi()
     level = meta.max_level
     lw, lh, ts, ol = meta.width, meta.height, meta.tile_size, meta.overlap
@@ -330,8 +399,10 @@ def build_prediction_dzip(
                     logger.info("  tiles %d/%d  %.1f/s  ETA %.0fs", n, total, rate, eta)
 
     tile_coords = [(c, r) for r in range(num_rows) for c in range(num_cols)]
-    # Cap at 128 concurrent tile threads per image — beyond that connections are bottlenecked
-    actual_workers = min(workers, total, 128)
+    # When reading locally: cap = workers (CPU-bound, no network limit)
+    # When reading remotely: cap at 128 (data-proxy rate-limits per token)
+    cap = workers if local_path is not None else 128
+    actual_workers = min(workers, total, cap)
     logger.info("  predicting %d tiles with %d workers", total, actual_workers)
 
     with ThreadPoolExecutor(max_workers=actual_workers) as pool:
@@ -380,6 +451,7 @@ def run(
     output_dir: str,
     token: Optional[str],
     workers: int,
+    prefetch_dir: Optional[pathlib.Path] = None,
 ) -> int:
     """Returns exit code."""
     t0 = time.time()
@@ -401,12 +473,24 @@ def run(
         return 1
     logger.info("Found %d images to process", total)
 
+    # ── 2.5 Prefetch (optional) ───────────────────────────────────────────────
+    local_cache: dict[str, pathlib.Path] = {}
+    if prefetch_dir is not None:
+        logger.info("=" * 60)
+        logger.info("PHASE 2.5 — PREFETCH to %s", prefetch_dir)
+        logger.info("=" * 60)
+        local_cache = prefetch_sources(sources, prefetch_dir, token, workers)
+        logger.info("Prefetch complete: %d files", len(local_cache))
+
     # ── 3. Predict + upload each image ────────────────────────────────────────
-    # Sequential: data-proxy caps total throughput per token to ~6-7 tiles/s
-    # regardless of concurrency. Running images in parallel just spreads the
-    # same bandwidth thinner and makes wall-clock time worse.
+    # Sequential: data-proxy caps total throughput per token to ~6-7 tiles/s.
+    # With --prefetch-dir tiles are read from local disk — fully CPU-bound.
     logger.info("=" * 60)
-    logger.info("PHASE 3 — BATCH EXPORT  (%d workers per image)", workers)
+    logger.info(
+        "PHASE 3 — BATCH EXPORT  (%d workers per image%s)",
+        workers,
+        ", local disk" if prefetch_dir else "",
+    )
     logger.info("=" * 60)
     output_base = output_dir.rstrip("/")
     failed: list[str] = []
@@ -416,12 +500,21 @@ def run(
         src_name = src["name"]
         dzi_name = src_name.replace(".dzip", "").replace(".zip", "")
         dest_url = f"{output_base}/{src_name}"
+        local_path = local_cache.get(src_name)
 
-        logger.info("[%d/%d] %s", idx, total, src_name)
+        logger.info(
+            "[%d/%d] %s%s", idx, total, src_name, " (local)" if local_path else ""
+        )
         tmpdir = None
         try:
             tmpdir, dzip_path = build_prediction_dzip(
-                src_url, dzi_name, clf, features, token, workers
+                src_url,
+                dzi_name,
+                clf,
+                features,
+                token,
+                workers,
+                local_path=local_path,
             )
             logger.info("  uploading → %s", dest_url)
             upload_dzip(dzip_path, dest_url, token)
@@ -658,6 +751,11 @@ def _cmd_run(args: argparse.Namespace) -> int:
         output_dir=args.output_dir,
         token=token,
         workers=args.workers,
+        prefetch_dir=(
+            pathlib.Path(args.prefetch_dir)
+            if getattr(args, "prefetch_dir", None)
+            else None
+        ),
     )
 
 
@@ -754,6 +852,13 @@ def main(argv: Optional[list[str]] = None) -> None:
     p_run.add_argument("--level", type=int, default=None)
     _add_token_args(p_run)
     p_run.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
+    p_run.add_argument(
+        "--prefetch-dir",
+        metavar="DIR",
+        default=None,
+        help="Download all source DZIPs here first, then predict from local disk "
+        "(eliminates network bottleneck during prediction — use to benchmark CPU throughput)",
+    )
 
     # ── dispatch ──────────────────────────────────────────────────────────────
     args = root.parse_args(argv)
