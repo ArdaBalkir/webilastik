@@ -60,10 +60,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
 import numpy as np
-from PIL import Image
 
 from .classifier import Classifier
 from .dzi_source import DzipSource
+from .encoding import encode_prediction_png
 from .features import extract_features
 
 # ── Logging ───────────────────────────────────────────────────────────────────
@@ -80,6 +80,30 @@ logger = logging.getLogger("wi2.headless")
 
 _DP_BASE = "https://data-proxy.ebrains.eu/api/v1"
 _RE = re.compile(r"")  # initialised below
+
+
+def _make_session(workers: int, token: Optional[str]) -> Any:
+    """
+    Build a requests.Session whose connection pool is sized to the number of
+    concurrent workers so urllib3 never discards connections under load.
+    Rule of thumb: pool_connections = ceil(workers / 4) host buckets,
+    pool_maxsize = workers + a few spare slots.
+    """
+    import requests
+    from requests.adapters import HTTPAdapter
+
+    pool_size = workers + 4  # spare slots so burst doesn't discard
+    adapter = HTTPAdapter(
+        pool_connections=max(4, workers // 4),
+        pool_maxsize=pool_size,
+        max_retries=3,
+    )
+    s = requests.Session()
+    s.mount("https://", adapter)
+    s.mount("http://", adapter)
+    if token:
+        s.headers.update({"Authorization": f"Bearer {token}"})
+    return s
 
 
 def _dp_normalize(url: str) -> str:
@@ -149,25 +173,6 @@ def _list_dzips(dir_url: str, token: Optional[str]) -> list[dict]:
     return results
 
 
-# ── PNG encoding (mirrors server.py) ─────────────────────────────────────────
-
-
-def _encode_prediction_png(proba: np.ndarray) -> bytes:
-    h, w, n = proba.shape
-    n_ch = min(n, 4)
-    rgba = np.zeros((h, w, 4), dtype=np.uint8)
-    for i in range(n_ch):
-        rgba[:, :, i] = (proba[:, :, i] * 255).clip(0, 255).astype(np.uint8)
-    mode = "RGBA" if n >= 3 else ("RGB" if n == 2 else "L")
-    arr = rgba[:, :, :n_ch] if mode != "L" else rgba[:, :, 0]
-    img = Image.fromarray(arr, mode=mode)
-    import io
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
-
-
 # ── Training ──────────────────────────────────────────────────────────────────
 
 
@@ -201,7 +206,9 @@ def train(
             len(strokes_raw),
         )
 
-        src = DzipSource(dzip_url, bearer_token=token)
+        src = DzipSource(
+            dzip_url, session=_make_session(workers, token), bearer_token=token
+        )
         _, meta = src.find_dzi()
         level = level_hint if level_hint is not None else meta.max_level
 
@@ -272,7 +279,9 @@ def build_prediction_dzip(
     filters: list[str] = features["filters"]
     scales: list[float] = features["scales"]
 
-    src = DzipSource(dzip_url, bearer_token=token)
+    src = DzipSource(
+        dzip_url, session=_make_session(workers, token), bearer_token=token
+    )
     _, meta = src.find_dzi()
     level = meta.max_level
     lw, lh, ts, ol = meta.width, meta.height, meta.tile_size, meta.overlap
@@ -304,7 +313,8 @@ def build_prediction_dzip(
             feat = extract_features(tile_arr, filters, scales)
             h, w = tile_arr.shape[:2]
             proba = clf.predict_proba(feat).reshape(h, w, -1)
-            png = _encode_prediction_png(proba)
+            assert clf.classes_ is not None
+            png = encode_prediction_png(proba, clf.classes_.tolist())
             (tiles_dir / f"{col}_{row}.png").write_bytes(png)
         except Exception as e:
             with lock:
@@ -431,146 +441,330 @@ def run(
     return 0 if not failed else 1
 
 
-# ── CLI entry point ───────────────────────────────────────────────────────────
+# ── Shared argument helpers ────────────────────────────────────────────────────
+
+_DEFAULT_FEATURES = (
+    '{"filters":["gaussianSmoothing","laplacianOfGaussian",'
+    '"gaussianGradientMagnitude","hessianOfGaussianEigenvalues"],'
+    '"scales":[0.7,1.6,3.5,5.0]}'
+)
+_DEFAULT_WORKERS = int(os.environ.get("SLURM_CPUS_PER_TASK", str(os.cpu_count() or 8)))
 
 
-def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
-    p = argparse.ArgumentParser(
-        prog="python -m backend.headless_cli",
-        description="Webilastik 2.0 — train + batch export without a running server",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
+def _add_token_args(p: argparse.ArgumentParser) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
+        "--token", metavar="TOKEN", help="Bearer token (avoid on shared systems)"
+    )
+    g.add_argument("--token-file", metavar="FILE", help="File containing bearer token")
+    g.add_argument(
+        "--token-env",
+        metavar="VAR",
+        help="Env var holding bearer token (safe for batch scripts)",
     )
 
-    # Annotations
-    ann = p.add_mutually_exclusive_group(required=True)
-    ann.add_argument(
-        "--annotations",
-        metavar="FILE",
-        help="Path to annotations JSON file (or - to read from stdin)",
-    )
-    ann.add_argument(
-        "--annotations-b64",
-        metavar="B64",
-        help="Base64-encoded annotations JSON (used by sbatch scripts)",
-    )
 
-    # Sources
-    p.add_argument(
-        "--t-source",
-        metavar="URL",
-        help="Optional: single DZIP URL for training (overrides dzip_url in JSON)",
-    )
-    p.add_argument(
-        "--p-source",
-        required=True,
-        metavar="URL",
-        help="Data-proxy directory URL containing source DZIPs to predict",
-    )
-    p.add_argument(
-        "--output-dir",
-        required=True,
-        metavar="URL",
-        help="Data-proxy directory URL where prediction DZIPs will be written",
-    )
-
-    # Features
-    feat = p.add_mutually_exclusive_group()
-    feat.add_argument(
+def _add_features_args(p: argparse.ArgumentParser) -> None:
+    g = p.add_mutually_exclusive_group()
+    g.add_argument(
         "--features",
         metavar="JSON",
-        default='{"filters":["gaussianSmoothing","laplacianOfGaussian","gaussianGradientMagnitude","hessianOfGaussianEigenvalues"],"scales":[0.7,1.6,3.5,5.0]}',
-        help="Feature config JSON string",
+        default=_DEFAULT_FEATURES,
+        help="Feature config as JSON string",
     )
-    feat.add_argument(
-        "--features-file", metavar="FILE", help="Path to features JSON file"
-    )
+    g.add_argument("--features-file", metavar="FILE", help="Feature config JSON file")
 
-    # Training level
-    p.add_argument(
-        "--level",
-        type=int,
-        default=None,
-        help="DZI level to train at (default: max level = full res)",
-    )
 
-    # Auth
-    tok = p.add_mutually_exclusive_group()
-    tok.add_argument(
-        "--token",
-        metavar="TOKEN",
-        help="Bearer token (avoid on shared systems — prefer --token-file)",
+def _add_annotations_args(p: argparse.ArgumentParser) -> None:
+    g = p.add_mutually_exclusive_group(required=True)
+    g.add_argument(
+        "--annotations", metavar="FILE", help="Annotations JSON file (- to read stdin)"
     )
-    tok.add_argument(
-        "--token-file", metavar="FILE", help="Path to file containing bearer token"
-    )
-    tok.add_argument(
-        "--token-env",
-        metavar="ENV_VAR",
-        help="Name of environment variable holding bearer token",
+    g.add_argument(
+        "--annotations-b64",
+        metavar="B64",
+        help="Base64-encoded annotations JSON (for sbatch embedding)",
     )
 
-    # Parallelism
-    p.add_argument(
-        "--workers",
-        type=int,
-        default=int(os.environ.get("SLURM_CPUS_PER_TASK", str(os.cpu_count() or 8))),
-        help="Number of parallel tile workers (default: $SLURM_CPUS_PER_TASK or cpu_count)",
-    )
 
-    return p.parse_args(argv)
+def _resolve_token(args: argparse.Namespace) -> Optional[str]:
+    if getattr(args, "token", None):
+        return args.token.strip()
+    if getattr(args, "token_file", None):
+        return pathlib.Path(args.token_file).read_text().strip()
+    if getattr(args, "token_env", None):
+        return os.environ.get(args.token_env, "").strip() or None
+    return None
 
 
-def main(argv: Optional[list[str]] = None) -> None:
-    args = _parse_args(argv)
+def _resolve_features(args: argparse.Namespace) -> dict:
+    if getattr(args, "features_file", None):
+        with open(args.features_file, encoding="utf-8") as f:
+            return json.load(f)
+    return json.loads(args.features)
 
-    # ── Load annotations ──────────────────────────────────────────────────────
-    if args.annotations_b64:
-        raw = base64.b64decode(args.annotations_b64).decode("utf-8")
-        annotations: list[dict] = json.loads(raw)
-    elif args.annotations == "-":
-        annotations = json.load(sys.stdin)
-    else:
-        with open(args.annotations, encoding="utf-8") as f:
-            annotations = json.load(f)
 
-    # If --t-source overrides all dzip_urls in the annotations
+def _resolve_annotations(args: argparse.Namespace) -> list[dict]:
+    if getattr(args, "annotations_b64", None):
+        return json.loads(base64.b64decode(args.annotations_b64).decode())
+    src = args.annotations
+    if src == "-":
+        return json.load(sys.stdin)
+    with open(src, encoding="utf-8") as f:
+        return json.load(f)
+
+
+# ── Subcommand: list ───────────────────────────────────────────────────────────
+#   python -m backend.headless_cli list --url URL [--token-env VAR]
+#
+#   Discover all .dzip files in a data-proxy directory.
+#   Good first test: verifies bucket access and URL parsing.
+
+
+# when public: python -m backend.headless_cli list --url https://data-proxy.ebrains.eu/api/v1/buckets/rwb-arda2014/demo_project/CP_Pvalb/zipped_images/
+# w tken --token
+def _cmd_list(args: argparse.Namespace) -> int:
+    try:
+        token = _resolve_token(args)
+    except Exception as e:
+        logger.error("proceeding with no token: %s", e)
+        return 1
+
+    logger.info("Listing DZIPs in: %s", args.url)
+    sources = _list_dzips(args.url, token)
+    if not sources:
+        logger.warning("No .dzip files found.")
+        return 1
+    print(f"Found {len(sources)} DZIP(s):")
+    for s in sources:
+        print(f"  {s['name']:40s}  {s['object_url']}")
+    return 0
+
+
+# ── Subcommand: train ──────────────────────────────────────────────────────────
+#   python -m backend.headless_cli train --annotations FILE --output-model FILE
+#
+#   Train a classifier and save it to disk (pickle).
+#   Lets you verify feature extraction and RF training independently.
+
+
+def _cmd_train(args: argparse.Namespace) -> int:
+    import pickle
+
+    annotations = _resolve_annotations(args)
+    features = _resolve_features(args)
+    token = _resolve_token(args)
+
     if args.t_source:
         for ann in annotations:
             ann.setdefault("dzip_url", args.t_source)
 
-    # ── Load features ─────────────────────────────────────────────────────────
-    if args.features_file:
-        with open(args.features_file, encoding="utf-8") as f:
-            features: dict = json.load(f)
-    else:
-        features = json.loads(args.features)
+    logger.info(
+        "TRAIN: %d annotation entries, features: %s @ %s",
+        len(annotations),
+        features["filters"],
+        features["scales"],
+    )
+    clf = train(annotations, features, args.level, token, args.workers)
 
-    # ── Load token ────────────────────────────────────────────────────────────
-    token: Optional[str] = None
-    if args.token:
-        token = args.token.strip()
-    elif args.token_file:
-        token = pathlib.Path(args.token_file).read_text().strip()
-    elif args.token_env:
-        token = os.environ.get(args.token_env, "").strip() or None
+    out = pathlib.Path(args.output_model)
+    with open(out, "wb") as f:
+        pickle.dump(clf, f)
+    logger.info("Model saved to %s", out)
+    return 0
+
+
+# ── Subcommand: predict ────────────────────────────────────────────────────────
+#   python -m backend.headless_cli predict \
+#       --model model.pkl --p-source URL --output-dir URL
+#
+#   Load a pre-trained model and batch-export all images in p-source.
+#   Lets you re-run or retry the export without re-training.
+
+
+def _cmd_predict(args: argparse.Namespace) -> int:
+    import pickle
+
+    token = _resolve_token(args)
+    features = _resolve_features(args)
+
+    with open(args.model, "rb") as f:
+        clf: Classifier = pickle.load(f)
+    logger.info("Loaded model from %s (%d classes)", args.model, clf.n_classes)
+
+    sources = _list_dzips(args.p_source, token)
+    if not sources:
+        logger.error("No .dzip files found in %s", args.p_source)
+        return 1
+
+    output_base = args.output_dir.rstrip("/")
+    failed: list[str] = []
+    for idx, src in enumerate(sources, 1):
+        src_url = src["object_url"]
+        src_name = src["name"]
+        dzi_name = src_name.replace(".dzip", "").replace(".zip", "")
+        dest_url = f"{output_base}/{src_name}"
+        logger.info("[%d/%d] %s", idx, len(sources), src_name)
+        tmpdir = None
+        try:
+            tmpdir, dzip_path = build_prediction_dzip(
+                src_url, dzi_name, clf, features, token, args.workers
+            )
+            upload_dzip(dzip_path, dest_url, token)
+            logger.info("  ✓ done")
+        except Exception as e:
+            logger.error("  ✗ FAILED: %s", e)
+            failed.append(src_name)
+        finally:
+            if tmpdir:
+                shutil.rmtree(tmpdir, ignore_errors=True)
+
+    logger.info("DONE %d/%d succeeded", len(sources) - len(failed), len(sources))
+    return 0 if not failed else 1
+
+
+# ── Subcommand: run ────────────────────────────────────────────────────────────
+#   python -m backend.headless_cli run --annotations FILE \
+#       --p-source URL --output-dir URL
+#
+#   Full pipeline: train + predict + upload.  This is what sbatch calls.
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    annotations = _resolve_annotations(args)
+    features = _resolve_features(args)
+    token = _resolve_token(args)
+
+    if getattr(args, "t_source", None):
+        for ann in annotations:
+            ann.setdefault("dzip_url", args.t_source)
 
     logger.info("Workers:    %d", args.workers)
     logger.info("Features:   %s @ scales %s", features["filters"], features["scales"])
     logger.info("p_source:   %s", args.p_source)
     logger.info("output_dir: %s", args.output_dir)
-    logger.info("Auth:       %s", "token present" if token else "NO TOKEN")
+    logger.info(
+        "Auth:       %s", "token present" if token else "NO TOKEN (public buckets only)"
+    )
 
-    rc = run(
+    return run(
         annotations=annotations,
         features=features,
-        level_hint=args.level,
+        level_hint=getattr(args, "level", None),
         p_source=args.p_source,
         output_dir=args.output_dir,
         token=token,
         workers=args.workers,
     )
-    sys.exit(rc)
+
+
+# ── Root parser ────────────────────────────────────────────────────────────────
+
+
+def main(argv: Optional[list[str]] = None) -> None:
+    root = argparse.ArgumentParser(
+        prog="python -m backend.headless_cli",
+        description=(
+            "Webilastik 2.0 headless pipeline.\n\n"
+            "Subcommands:\n"
+            "  list     — discover .dzip files in a data-proxy directory\n"
+            "  train    — train a classifier from annotations, save model\n"
+            "  predict  — load a saved model, predict all images in a dir\n"
+            "  run      — full pipeline: train + predict + upload (for sbatch)\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sub = root.add_subparsers(dest="command")
+
+    # ── list ──────────────────────────────────────────────────────────────────
+    p_list = sub.add_parser("list", help="List .dzip files in a data-proxy directory")
+    p_list.add_argument(
+        "--url", required=True, metavar="URL", help="Data-proxy directory URL"
+    )
+    _add_token_args(p_list)
+
+    # ── train ─────────────────────────────────────────────────────────────────
+    p_train = sub.add_parser("train", help="Train classifier, save model to disk")
+    _add_annotations_args(p_train)
+    p_train.add_argument(
+        "--t-source", metavar="URL", help="Override dzip_url for all annotations"
+    )
+    p_train.add_argument(
+        "--output-model",
+        required=True,
+        metavar="FILE",
+        help="Output path for the pickled model",
+    )
+    _add_features_args(p_train)
+    p_train.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help="DZI training level (default: max = full res)",
+    )
+    _add_token_args(p_train)
+    p_train.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
+
+    # ── predict ───────────────────────────────────────────────────────────────
+    p_pred = sub.add_parser("predict", help="Predict from saved model, upload results")
+    p_pred.add_argument(
+        "--model",
+        required=True,
+        metavar="FILE",
+        help="Path to pickled model (from 'train')",
+    )
+    p_pred.add_argument(
+        "--p-source",
+        required=True,
+        metavar="URL",
+        help="Data-proxy directory of source DZIPs",
+    )
+    p_pred.add_argument(
+        "--output-dir",
+        required=True,
+        metavar="URL",
+        help="Data-proxy directory for output DZIPs",
+    )
+    _add_features_args(p_pred)
+    _add_token_args(p_pred)
+    p_pred.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
+
+    # ── run ───────────────────────────────────────────────────────────────────
+    p_run = sub.add_parser("run", help="Full pipeline: train + predict + upload")
+    _add_annotations_args(p_run)
+    p_run.add_argument(
+        "--t-source", metavar="URL", help="Override dzip_url for all annotations"
+    )
+    p_run.add_argument(
+        "--p-source",
+        required=True,
+        metavar="URL",
+        help="Data-proxy directory of source DZIPs to predict",
+    )
+    p_run.add_argument(
+        "--output-dir",
+        required=True,
+        metavar="URL",
+        help="Data-proxy directory for output DZIPs",
+    )
+    _add_features_args(p_run)
+    p_run.add_argument("--level", type=int, default=None)
+    _add_token_args(p_run)
+    p_run.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
+
+    # ── dispatch ──────────────────────────────────────────────────────────────
+    args = root.parse_args(argv)
+    if args.command is None:
+        root.print_help()
+        sys.exit(1)
+
+    dispatch = {
+        "list": _cmd_list,
+        "train": _cmd_train,
+        "predict": _cmd_predict,
+        "run": _cmd_run,
+    }
+    sys.exit(dispatch[args.command](args))
 
 
 if __name__ == "__main__":

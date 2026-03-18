@@ -442,8 +442,35 @@ select {
   background: #3dd6c0;
 }
 
-/* ── Batch progress bar ──────────────────────────────────────────────────── */
+/* ── Batch / HPC job UI ──────────────────────────────────────────────────── */
 .batch-progress { display: flex; flex-direction: column; gap: 4px; }
+
+.hpc-job-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border-radius: 6px;
+  border: 1px solid #333;
+}
+
+.job-log {
+  font-family: "Fira Mono", "Courier New", monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #b0ffb0;
+  background: #0d0d0d;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 6px 8px;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 4px;
+}
 
 .progress-bar-bg {
   height: 6px;

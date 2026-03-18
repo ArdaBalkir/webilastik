@@ -75,6 +75,11 @@ export const tSourceUrl = signal<string>(""); // ?t_source= training dir / DZIP 
 export const pSourceUrl = signal<string>(""); // ?p_source= export dir URL
 export const outputDirUrl = signal<string>(""); // ?output_dir= destination dir URL
 
+// Allocator URL — points at session_allocator.py (port 8001 by default)
+export const allocatorUrl = signal<string>(
+  import.meta.env.VITE_ALLOCATOR_URL ?? "http://localhost:8001",
+);
+
 // ── Training source browser ───────────────────────────────────────────────
 export const trainingSources = signal<SourceEntry[]>([]);
 export const selectedTrainingSources = signal<Set<string>>(new Set()); // object_url set
@@ -131,6 +136,56 @@ export function loadProject(file: File): Promise<void> {
     classifierId.value = null;
     trainingStatus.value = "idle";
   });
+}
+
+/**
+ * Export all annotations (across all training images) in the format
+ * expected by headless_cli.py --annotations and POST /headless-run.
+ *
+ * Points are rescaled to max_level (full resolution) so the CLI does not
+ * need to know which zoom level was active when strokes were captured.
+ */
+export function saveAnnotationsForHeadless(): void {
+  // Flush current image strokes into the per-source map
+  const current: Record<string, Stroke[]> = {
+    ...strokesBySource.value,
+  };
+  if (dziUrl.value && strokes.value.length > 0) {
+    current[dziUrl.value] = strokes.value;
+  }
+
+  const meta = dziMeta.value;
+  const targetLevel = meta ? meta.maxLevel : null;
+
+  const annotations = Object.entries(current)
+    .filter(([, ss]) => ss.length > 0)
+    .map(([dzip_url, ss]) => ({
+      dzip_url,
+      strokes: ss.map((s) => ({
+        label: s.labelId,
+        points: s.points.map(([x, y]) => {
+          // Rescale from stroke capture level → full res (max_level)
+          const factor =
+            targetLevel !== null ? Math.pow(2, targetLevel - s.level) : 1;
+          return [Math.round(x * factor), Math.round(y * factor)];
+        }),
+      })),
+    }));
+
+  if (annotations.length === 0) {
+    alert("No annotations to export — paint some strokes first.");
+    return;
+  }
+
+  const json = JSON.stringify(annotations, null, 2);
+  const blob = new Blob([json], { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  // e.g. "annotations_2img.json"
+  a.download = `annotations_${annotations.length}img.json`;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export function nextLabelId(): number {

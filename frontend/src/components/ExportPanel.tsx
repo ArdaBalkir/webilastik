@@ -1,96 +1,165 @@
 /**
- * ExportPanel — batch prediction export collapsible
+ * ExportPanel — HPC batch export via session allocator
  *
- * Reads ?p_source= and ?output_dir= from state (URL params).
- * Resolves all DZIPs in p_source, sends a batch-export job per classifier,
- * and polls progress.
+ * Flow:
+ *   1. User fills p_source + output_dir (pre-seeded from ?p_source= / ?output_dir=)
+ *   2. "Run on HPC" → POST to allocator /headless-jobs (includes annotations)
+ *   3. Poll allocator every 5s for SLURM status
+ *   4. "Show log" tail-fetches the SLURM job log over SSH via the allocator
+ *
+ * The compute server (server.py) is NOT used for export — everything runs on HPC.
  */
 import { h } from "preact";
 import { useEffect } from "preact/hooks";
 import { useSignal } from "@preact/signals";
-import { ApiClient, featureConfigToFilters } from "../api";
+import { SessionAllocatorClient, featureConfigToFilters } from "../api";
+import type { HpcJobStatus } from "../api";
 import * as state from "../state";
-import type { BatchExportStatus } from "../types";
+
+const STATUS_ICON: Record<string, string> = {
+  pending: "⏳",
+  running: "🔄",
+  done: "✅",
+  error: "❌",
+  cancelled: "🚫",
+};
 
 export function ExportPanel() {
   const open = useSignal(false);
   const pSource = useSignal(state.pSourceUrl.value);
   const outputDir = useSignal(state.outputDirUrl.value);
+  const allocatorUrlInput = useSignal(state.allocatorUrl.value);
+
+  const jobStatus = useSignal<HpcJobStatus | null>(null);
   const msg = useSignal("");
-  const jobId = state.batchJobId;
-  const batchStatus = state.batchStatus;
+  const log = useSignal("");
+  const showLog = useSignal(false);
+  const polling = useSignal<ReturnType<typeof setInterval> | null>(null);
 
-  // Poll when a job is running
-  useEffect(() => {
-    let interval: ReturnType<typeof setInterval> | null = null;
+  function makeClient() {
+    return new SessionAllocatorClient(
+      allocatorUrlInput.value.trim(),
+      state.bearerToken.value,
+    );
+  }
 
-    const unsub = jobId.subscribe((id) => {
-      if (interval) clearInterval(interval);
-      if (!id) return;
-      const client = new ApiClient(
-        state.serverUrl.value,
-        state.bearerToken.value,
-      );
-      interval = setInterval(async () => {
-        try {
-          const s = await client.getBatchExportStatus(id);
-          batchStatus.value = s;
-          if (s.status === "done" || s.status === "error") {
-            clearInterval(interval!);
-            interval = null;
-            msg.value =
-              s.status === "done"
-                ? `Done — ${s.done}/${s.total} exported.`
-                : `Error: ${s.error ?? "unknown"}`;
-          }
-        } catch (e) {
-          msg.value = String(e);
-          clearInterval(interval!);
-        }
-      }, 2500);
-    });
-
-    return () => {
-      unsub();
-      if (interval) clearInterval(interval);
-    };
-  }, []);
-
-  async function startExport() {
-    const cid = state.classifierId.value;
-    if (!cid) {
-      msg.value = "Train a classifier first.";
-      return;
-    }
-    if (!pSource.value.trim() || !outputDir.value.trim()) {
-      msg.value = "Set both p_source and output_dir.";
-      return;
-    }
-    msg.value = "Submitting batch job…";
-    batchStatus.value = null;
-    try {
-      const client = new ApiClient(
-        state.serverUrl.value,
-        state.bearerToken.value,
-      );
-      const fc = state.featureConfig.value;
-      const res = await client.startBatchExport({
-        classifier_id: cid,
-        p_source: pSource.value.trim(),
-        output_dir: outputDir.value.trim(),
-        features: {
-          filters: featureConfigToFilters(fc),
-          scales: fc.scales,
-        },
-      });
-      jobId.value = res.job_id;
-      msg.value = `Job started: ${res.job_id}`;
-    } catch (e) {
-      msg.value = `Failed: ${e}`;
+  function stopPolling() {
+    if (polling.value) {
+      clearInterval(polling.value);
+      polling.value = null;
     }
   }
 
-  const status = batchStatus.value;
+  function startPolling(jobId: string) {
+    stopPolling();
+    polling.value = setInterval(async () => {
+      try {
+        const s = await makeClient().getHeadlessJob(jobId);
+        jobStatus.value = s;
+        if (s.status === "done") {
+          stopPolling();
+          msg.value = `✅ Done — SLURM job ${s.slurm_job_id} completed.`;
+        } else if (s.status === "error" || s.status === "cancelled") {
+          stopPolling();
+          msg.value = `❌ Job ${s.slurm_job_id} ended with status: ${s.slurm_state}`;
+        }
+      } catch (e) {
+        msg.value = `Poll error: ${e}`;
+      }
+    }, 5000);
+  }
+
+  // Sync allocator URL signal when user edits the input
+  useEffect(() => {
+    const unsub = allocatorUrlInput.subscribe((v) => {
+      state.allocatorUrl.value = v;
+    });
+    return unsub;
+  }, []);
+
+  // Cleanup on unmount
+  useEffect(() => () => stopPolling(), []);
+
+  async function submitJob() {
+    if (!pSource.value.trim() || !outputDir.value.trim()) {
+      msg.value = "Set both source directory and output directory.";
+      return;
+    }
+
+    // Collect all annotations from all sources
+    const bySource = { ...state.strokesBySource.value };
+    if (state.dziUrl.value && state.strokes.value.length > 0) {
+      bySource[state.dziUrl.value] = state.strokes.value;
+    }
+
+    const annotations = Object.entries(bySource)
+      .filter(([, ss]) => ss.length > 0)
+      .map(([dzip_url, ss]) => ({
+        dzip_url,
+        strokes: ss.map((s) => ({
+          label: s.labelId,
+          points: s.points,
+        })),
+      }));
+
+    if (annotations.length === 0) {
+      msg.value = "No annotations — paint some strokes first.";
+      return;
+    }
+
+    const fc = state.featureConfig.value;
+    const features = {
+      filters: featureConfigToFilters(fc),
+      scales: fc.scales,
+    };
+
+    msg.value = `Submitting HPC job (${annotations.length} annotated image(s))…`;
+    jobStatus.value = null;
+    log.value = "";
+    showLog.value = false;
+
+    try {
+      const res = await makeClient().submitHeadlessJob({
+        annotations,
+        features,
+        p_source: pSource.value.trim(),
+        output_dir: outputDir.value.trim(),
+      });
+      jobStatus.value = res;
+      msg.value = `Submitted → SLURM job ${res.slurm_job_id}`;
+      startPolling(res.job_id);
+    } catch (e) {
+      msg.value = `Submission failed: ${e}`;
+    }
+  }
+
+  async function cancelJob() {
+    const js = jobStatus.value;
+    if (!js) return;
+    try {
+      await makeClient().cancelHeadlessJob(js.job_id);
+      stopPolling();
+      msg.value = `Cancelled SLURM job ${js.slurm_job_id}`;
+      jobStatus.value = { ...js, status: "cancelled" };
+    } catch (e) {
+      msg.value = `Cancel failed: ${e}`;
+    }
+  }
+
+  async function fetchLog() {
+    const js = jobStatus.value;
+    if (!js) return;
+    try {
+      log.value = "Loading…";
+      showLog.value = true;
+      log.value = await makeClient().getJobLog(js.job_id, 100);
+    } catch (e) {
+      log.value = `Could not fetch log: ${e}`;
+    }
+  }
+
+  const js = jobStatus.value;
+  const isActive = js && (js.status === "pending" || js.status === "running");
 
   return (
     <section class="panel collapsible">
@@ -98,63 +167,88 @@ export function ExportPanel() {
         class="collapsible-header"
         onClick={() => (open.value = !open.value)}
       >
-        <span>Batch Export</span>
+        <span>HPC Export</span>
+        {js && (
+          <span style={{ marginLeft: 6 }}>{STATUS_ICON[js.status] ?? ""}</span>
+        )}
         <span class="chevron">{open.value ? "▲" : "▼"}</span>
       </button>
 
       {open.value && (
         <div class="collapsible-body">
+          <label class="hint">Allocator URL</label>
+          <input
+            class="input-url"
+            value={allocatorUrlInput.value}
+            placeholder="http://localhost:8001"
+            onInput={(e: Event) =>
+              (allocatorUrlInput.value = (e.target as HTMLInputElement).value)
+            }
+          />
+
           <label class="hint">Source directory (p_source)</label>
           <input
             class="input-url"
             value={pSource.value}
-            placeholder="https://data-proxy.ebrains.eu/api/v1/buckets/…"
+            placeholder="https://data-proxy.ebrains.eu/api/v1/buckets/…/images/"
             onInput={(e: Event) =>
               (pSource.value = (e.target as HTMLInputElement).value)
             }
           />
+
           <label class="hint">Output directory</label>
           <input
             class="input-url"
             value={outputDir.value}
-            placeholder="https://data-proxy.ebrains.eu/api/v1/buckets/…/segmentations"
+            placeholder="https://data-proxy.ebrains.eu/api/v1/buckets/…/segmentations/"
             onInput={(e: Event) =>
               (outputDir.value = (e.target as HTMLInputElement).value)
             }
           />
 
-          <button
-            class="btn btn-train"
-            onClick={startExport}
-            disabled={!state.classifierId.value}
-          >
-            Run Batch Export
-          </button>
+          <div class="row" style={{ gap: 6, marginTop: 8 }}>
+            <button
+              class="btn btn-train"
+              onClick={submitJob}
+              disabled={!!isActive}
+            >
+              {isActive ? "Running on HPC…" : "Run on HPC"}
+            </button>
+            {isActive && (
+              <button class="btn-sm danger" onClick={cancelJob}>
+                Cancel
+              </button>
+            )}
+          </div>
 
-          {msg.value && <p class="status">{msg.value}</p>}
+          {msg.value && (
+            <p class={`status ${js?.status === "error" ? "error" : ""}`}>
+              {msg.value}
+            </p>
+          )}
 
-          {status && (
-            <div class="batch-progress">
-              <div class="progress-bar-bg">
-                <div
-                  class="progress-bar-fill"
-                  style={{
-                    width: `${Math.round((status.progress ?? 0) * 100)}%`,
-                  }}
-                />
-              </div>
+          {js && (
+            <div class="hpc-job-info">
               <p class="hint">
-                {status.done}/{status.total} images
-                {status.current ? ` — ${status.current}` : ""}
+                SLURM {js.slurm_job_id} &nbsp;·&nbsp;
+                <strong>{js.slurm_state}</strong>
+                {js.status === "running" && " 🔄"}
               </p>
-              {status.failed.length > 0 && (
-                <p class="status error">
-                  {status.failed.length} failed:{" "}
-                  {status.failed
-                    .slice(0, 3)
-                    .map((f) => f.name)
-                    .join(", ")}
-                </p>
+              <div class="row" style={{ gap: 6 }}>
+                <button class="btn-sm" onClick={fetchLog}>
+                  {showLog.value ? "Refresh log" : "Show log"}
+                </button>
+                {showLog.value && (
+                  <button
+                    class="btn-sm"
+                    onClick={() => (showLog.value = false)}
+                  >
+                    Hide log
+                  </button>
+                )}
+              </div>
+              {showLog.value && log.value && (
+                <pre class="job-log">{log.value}</pre>
               )}
             </div>
           )}

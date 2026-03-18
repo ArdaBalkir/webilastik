@@ -1,14 +1,26 @@
 """
-Webilastik 2.0 — Compute Server
+Webilastik 2.0 — Annotation / Preview Compute Server
+
+This server runs LOCALLY (or on a small gateway machine).
+Its only purpose is to support the annotation UI — it is NOT used for
+bulk export.  Bulk export runs on HPC via backend.session_allocator + sbatch.
 
 Endpoints
 ---------
 GET  /health
-GET  /dzi-info?dzip_url=...
-POST /train
-GET  /predict/{classifier_id}/{level}/{tile_spec}?dzip_url=...&dzi_name=...&filters=...&scales=...
-POST /export
+GET  /dzi-info?dzip_url=...         — read DZI metadata from a remote DZIP
+GET  /list-sources?url=...          — list .dzip objects in a data-proxy directory
+POST /train                         — fit a Random Forest on brushstroke pixels
+GET  /predict/{clf_id}/{level}/{c}_{r}  — prediction tile PNG for live overlay
+
+The following endpoints exist for local single-image testing only and are
+NOT part of the HPC pipeline:
+POST /export                        — single-image export job (local)
 GET  /export/{job_id}
+POST /batch-export                  — multi-image export (local, CPU only)
+GET  /batch-export/{job_id}
+POST /export-zip                    — synchronous DZIP download
+POST /headless-run                  — all-in-one train+export (local testing)
 """
 
 from __future__ import annotations
@@ -34,6 +46,7 @@ from pydantic import BaseModel
 
 from .auth import verify_token, AuthError
 from .classifier import Classifier
+from .encoding import encode_prediction_png
 from .dzi_source import DzipSource
 from .features import extract_features
 
@@ -206,7 +219,8 @@ def _build_prediction_dzip(
             feat = extract_features(tile_arr, features.filters, features.scales)
             h, w = tile_arr.shape[:2]
             proba = clf.predict_proba(feat).reshape(h, w, -1)
-            png = _encode_prediction_png(proba)
+            assert clf.classes_ is not None
+            png = encode_prediction_png(proba, clf.classes_.tolist())
             (tiles_dir / f"{col}_{row}.png").write_bytes(png)
         except Exception as e:
             with lock:
@@ -465,8 +479,8 @@ async def predict_tile(
         feat = extract_features(tile_arr, filter_list, scale_list)  # (H*W, F)
         proba = clf.predict_proba(feat)  # (H*W, n_classes)
         proba = proba.reshape(h, w, -1)
-
-        return _encode_prediction_png(proba)
+        assert clf.classes_ is not None
+        return encode_prediction_png(proba, clf.classes_.tolist())
 
     try:
         png_bytes = await _run(_predict)
@@ -1049,30 +1063,7 @@ async def _run_batch(
 # ── PNG encoding ──────────────────────────────────────────────────────────────
 
 
-def _encode_prediction_png(proba: np.ndarray) -> bytes:
-    """
-    Encode an (H, W, n_classes) float32 probability array as PNG.
-    Up to 4 classes are stored in R, G, B, A channels (uint8, value = prob*255).
-    For 2-class problems, just R and G are used.
-    """
-    h, w, n = proba.shape
-    n_ch = min(n, 4)
-    rgba = np.zeros((h, w, 4), dtype=np.uint8)
-    for i in range(n_ch):
-        rgba[:, :, i] = (proba[:, :, i] * 255).clip(0, 255).astype(np.uint8)
-
-    mode = "RGBA" if n >= 3 else ("RGB" if n == 2 else "L")
-    if mode == "L":
-        arr = rgba[:, :, 0]
-    elif mode == "RGB":
-        arr = rgba[:, :, :3]
-    else:
-        arr = rgba
-
-    img = Image.fromarray(arr, mode)
-    buf = io.BytesIO()
-    img.save(buf, "PNG", optimize=False)
-    return buf.getvalue()
+# _encode_prediction_png is now encode_prediction_png from backend.encoding
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────

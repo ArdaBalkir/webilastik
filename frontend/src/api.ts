@@ -153,6 +153,31 @@ export class ApiClient {
   }
 }
 
+export interface HpcJobRequest {
+  annotations: object[]; // [{dzip_url, strokes:[{label, points}]}]
+  t_source?: string;
+  features?: object;
+  level?: number;
+  p_source: string;
+  output_dir: string;
+  partition?: string;
+  cpus?: number;
+  mem?: string;
+  time_limit?: string;
+  account?: string;
+}
+
+export interface HpcJobStatus {
+  job_id: string;
+  slurm_job_id: string;
+  slurm_state: string;
+  status: "pending" | "running" | "done" | "error" | "cancelled";
+  p_source: string;
+  output_dir: string;
+  log_path: string;
+  created_at: number;
+}
+
 // ── Session allocator client ─────────────────────────────────────────────────
 export class SessionAllocatorClient {
   constructor(
@@ -204,6 +229,46 @@ export class SessionAllocatorClient {
 
   async deleteSession(sessionId: string): Promise<void> {
     await fetch(`${this.baseUrl}/sessions/${sessionId}`, {
+      method: "DELETE",
+      headers: this.headers(),
+    });
+  }
+
+  // ── Headless HPC jobs ──────────────────────────────────────────────────────
+
+  async submitHeadlessJob(req: HpcJobRequest): Promise<HpcJobStatus> {
+    const res = await fetch(`${this.baseUrl}/headless-jobs`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify(req),
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => res.statusText);
+      throw new Error(`Submit job failed (${res.status}): ${text}`);
+    }
+    return res.json();
+  }
+
+  async getHeadlessJob(jobId: string): Promise<HpcJobStatus> {
+    const res = await fetch(`${this.baseUrl}/headless-jobs/${jobId}`, {
+      headers: this.headers(),
+    });
+    if (!res.ok) throw new Error(`Get job failed: ${res.status}`);
+    return res.json();
+  }
+
+  async getJobLog(jobId: string, tail = 80): Promise<string> {
+    const res = await fetch(
+      `${this.baseUrl}/headless-jobs/${jobId}/log?tail=${tail}`,
+      { headers: this.headers() },
+    );
+    if (!res.ok) return "(could not fetch log)";
+    const data = await res.json();
+    return data.log ?? "(empty)";
+  }
+
+  async cancelHeadlessJob(jobId: string): Promise<void> {
+    await fetch(`${this.baseUrl}/headless-jobs/${jobId}`, {
       method: "DELETE",
       headers: this.headers(),
     });

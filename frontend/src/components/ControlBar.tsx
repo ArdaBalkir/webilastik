@@ -1,6 +1,7 @@
 import { h } from "preact";
 import * as state from "../state";
 import { Hand, Paintbrush } from "lucide-preact";
+import { saveAnnotationsForHeadless } from "../state";
 
 interface Props {
   onTrain: () => Promise<void>;
@@ -78,6 +79,15 @@ export function ControlBar({ onTrain }: Props) {
       {trainStatus === "error" && (
         <p class="error">{state.trainingError.value}</p>
       )}
+
+      {/* Export annotations for HPC/headless use */}
+      <button
+        class="btn-sm"
+        title="Download annotations JSON for headless_cli / HPC batch use"
+        onClick={saveAnnotationsForHeadless}
+      >
+        ↓ Export annotations.json
+      </button>
 
       {trainStatus === "ready" && (
         <>
