@@ -402,53 +402,36 @@ def run(
     logger.info("Found %d images to process", total)
 
     # ── 3. Predict + upload each image ────────────────────────────────────────
-    # Run images in parallel: split worker budget across concurrent images so
-    # total thread count stays ≤ workers (e.g. 3 images × 42 threads each).
-    n_parallel = min(total, max(1, workers // 16))  # at least 16 tile threads per image
-    workers_per_image = max(16, workers // n_parallel)
-
+    # Sequential: data-proxy caps total throughput per token to ~6-7 tiles/s
+    # regardless of concurrency. Running images in parallel just spreads the
+    # same bandwidth thinner and makes wall-clock time worse.
     logger.info("=" * 60)
-    logger.info(
-        "PHASE 3 — BATCH EXPORT  (%d images parallel, %d tile workers each)",
-        n_parallel,
-        workers_per_image,
-    )
+    logger.info("PHASE 3 — BATCH EXPORT  (%d workers per image)", workers)
     logger.info("=" * 60)
     output_base = output_dir.rstrip("/")
     failed: list[str] = []
-    import threading
 
-    failed_lock = threading.Lock()
-
-    def _process_image(idx: int, src: dict) -> None:
+    for idx, src in enumerate(sources, 1):
         src_url = src["object_url"]
         src_name = src["name"]
         dzi_name = src_name.replace(".dzip", "").replace(".zip", "")
         dest_url = f"{output_base}/{src_name}"
+
         logger.info("[%d/%d] %s", idx, total, src_name)
         tmpdir = None
         try:
             tmpdir, dzip_path = build_prediction_dzip(
-                src_url, dzi_name, clf, features, token, workers_per_image
+                src_url, dzi_name, clf, features, token, workers
             )
             logger.info("  uploading → %s", dest_url)
             upload_dzip(dzip_path, dest_url, token)
-            logger.info("  ✓ done  [%d/%d]", idx, total)
+            logger.info("  ✓ done")
         except Exception as e:
-            logger.error("  ✗ FAILED %s: %s", src_name, e)
-            with failed_lock:
-                failed.append(src_name)
+            logger.error("  ✗ FAILED: %s", e)
+            failed.append(src_name)
         finally:
             if tmpdir:
                 shutil.rmtree(tmpdir, ignore_errors=True)
-
-    with ThreadPoolExecutor(max_workers=n_parallel) as img_pool:
-        img_futs = [
-            img_pool.submit(_process_image, idx, src)
-            for idx, src in enumerate(sources, 1)
-        ]
-        for f in as_completed(img_futs):
-            f.result()  # re-raise unexpected executor errors
 
     # ── 4. Summary ────────────────────────────────────────────────────────────
     elapsed = time.time() - t0
