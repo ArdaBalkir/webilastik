@@ -325,6 +325,49 @@ def prefetch_sources(
     return results
 
 
+# ── Multiprocessing worker (module-level so it is picklable) ────────────────────
+# Each worker process receives a copy of the tile cache + classifier via the
+# initializer, then processes tiles with its own GIL — true parallelism.
+
+_mp: dict = {}  # per-process state set by initializer
+
+
+def _mp_init_worker(
+    clf: "Classifier",
+    tile_cache: "dict[tuple[int,int], bytes]",
+    filters: "list[str]",
+    scales: "list[float]",
+    fmt: str,
+    tiles_dir_str: str,
+) -> None:
+    _mp["clf"] = clf
+    _mp["cache"] = tile_cache
+    _mp["filters"] = filters
+    _mp["scales"] = scales
+    _mp["fmt"] = fmt
+    _mp["out"] = pathlib.Path(tiles_dir_str)
+
+
+def _mp_predict_tile(col_row: "tuple[int, int]") -> "tuple[int, int, str | None]":
+    """Run in a worker process. Returns (col, row, error_or_None)."""
+    col, row = col_row
+    raw = _mp["cache"].get((col, row))
+    if raw is None:
+        return col, row, "missing"
+    try:
+        img = Image.open(io.BytesIO(raw)).convert("RGB")
+        arr = np.asarray(img, dtype=np.uint8)
+        feat = extract_features(arr, _mp["filters"], _mp["scales"])
+        h, w = arr.shape[:2]
+        clf = _mp["clf"]
+        proba = clf.predict_proba(feat).reshape(h, w, -1)
+        png = encode_prediction_png(proba, clf.classes_.tolist())
+        (_mp["out"] / f"{col}_{row}.png").write_bytes(png)
+        return col, row, None
+    except Exception as exc:
+        return col, row, str(exc)
+
+
 # ── Prediction / DZIP building ────────────────────────────────────────────────
 
 
@@ -398,48 +441,72 @@ def build_prediction_dzip(
         )
 
     errors: list[str] = []
-    lock = threading.Lock()
-    done_count: list[int] = [0]
     t_start = time.time()
 
-    def process_tile(col: int, row: int) -> None:
-        try:
-            if tile_cache is not None:
-                raw = tile_cache.get((col, row))
-                if raw is None:
-                    return
-                img = Image.open(io.BytesIO(raw)).convert("RGB")
-                tile_arr = np.asarray(img, dtype=np.uint8)
-            else:
-                tile_arr = src.get_tile(dzi_name, level, col, row, meta.format)
-            feat = extract_features(tile_arr, filters, scales)
-            h, w = tile_arr.shape[:2]
-            proba = clf.predict_proba(feat).reshape(h, w, -1)
-            assert clf.classes_ is not None
-            png = encode_prediction_png(proba, clf.classes_.tolist())
-            (tiles_dir / f"{col}_{row}.png").write_bytes(png)
-        except Exception as e:
-            with lock:
-                errors.append(f"{col},{row}: {e}")
-        finally:
-            with lock:
-                done_count[0] += 1
-                n = done_count[0]
-                if n % 100 == 0 or n == total:
+    if tile_cache is not None:
+        # Local mode — ProcessPoolExecutor: each process has its own GIL so
+        # numpy/PIL work truly parallelises. Tile cache is copied once per
+        # worker process via the initializer (one-time pickling cost).
+        actual_workers = min(workers, total)
+        logger.info("  predicting %d tiles with %d processes", total, actual_workers)
+        done = 0
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(
+            max_workers=actual_workers,
+            initializer=_mp_init_worker,
+            initargs=(clf, tile_cache, filters, scales, meta.format, str(tiles_dir)),
+        ) as pool:
+            futs = {
+                pool.submit(_mp_predict_tile, (c, r)): (c, r) for c, r in tile_coords
+            }
+            for f in as_completed(futs):
+                col, row, err = f.result()
+                done += 1
+                if err and err != "missing":
+                    errors.append(f"{col},{row}: {err}")
+                if done % 100 == 0 or done == total:
                     elapsed = time.time() - t_start
-                    rate = n / elapsed if elapsed > 0 else 0
-                    eta = (total - n) / rate if rate > 0 else 0
-                    logger.info("  tiles %d/%d  %.1f/s  ETA %.0fs", n, total, rate, eta)
+                    rate = done / elapsed if elapsed > 0 else 0
+                    eta = (total - done) / rate if rate > 0 else 0
+                    logger.info(
+                        "  tiles %d/%d  %.1f/s  ETA %.0fs", done, total, rate, eta
+                    )
+    else:
+        # Remote mode — ThreadPoolExecutor: I/O-bound (data-proxy), GIL is fine.
+        actual_workers = min(workers, total, 128)
+        logger.info("  predicting %d tiles with %d workers", total, actual_workers)
+        lock = threading.Lock()
+        done_count: list[int] = [0]
 
-    # When local: pure CPU — use all workers. Remote: cap at 128 (data-proxy throttle).
-    cap = workers if local_path is not None else 128
-    actual_workers = min(workers, total, cap)
-    logger.info("  predicting %d tiles with %d workers", total, actual_workers)
+        def process_tile(col: int, row: int) -> None:
+            try:
+                tile_arr = src.get_tile(dzi_name, level, col, row, meta.format)
+                feat = extract_features(tile_arr, filters, scales)
+                h, w = tile_arr.shape[:2]
+                proba = clf.predict_proba(feat).reshape(h, w, -1)
+                assert clf.classes_ is not None
+                png = encode_prediction_png(proba, clf.classes_.tolist())
+                (tiles_dir / f"{col}_{row}.png").write_bytes(png)
+            except Exception as e:
+                with lock:
+                    errors.append(f"{col},{row}: {e}")
+            finally:
+                with lock:
+                    done_count[0] += 1
+                    n = done_count[0]
+                    if n % 100 == 0 or n == total:
+                        elapsed = time.time() - t_start
+                        rate = n / elapsed if elapsed > 0 else 0
+                        eta = (total - n) / rate if rate > 0 else 0
+                        logger.info(
+                            "  tiles %d/%d  %.1f/s  ETA %.0fs", n, total, rate, eta
+                        )
 
-    with ThreadPoolExecutor(max_workers=actual_workers) as pool:
-        futures = [pool.submit(process_tile, c, r) for c, r in tile_coords]
-        for f in as_completed(futures):
-            f.result()
+        with ThreadPoolExecutor(max_workers=actual_workers) as pool:
+            futures = [pool.submit(process_tile, c, r) for c, r in tile_coords]
+            for f in as_completed(futures):
+                f.result()
 
     if errors:
         logger.warning("  %d tile errors: %s", len(errors), "; ".join(errors[:5]))
