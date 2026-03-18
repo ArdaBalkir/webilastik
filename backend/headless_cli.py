@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import io
 import json
 import logging
 import math
@@ -60,6 +61,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional
 
 import numpy as np
+from PIL import Image
 
 from .classifier import Classifier
 from .dzi_source import DzipSource, LocalDzipSource
@@ -371,6 +373,30 @@ def build_prediction_dzip(
     tiles_dir = tmpdir / f"{out_name}_files" / str(level)
     tiles_dir.mkdir(parents=True)
 
+    tile_coords = [(c, r) for r in range(num_rows) for c in range(num_cols)]
+
+    # When local: preload all tiles from zip into memory in one sequential pass
+    # so workers never do file I/O (128 threads hammering the same zip = slower
+    # than 6 threads on a laptop due to zipfile + GPFS contention).
+    tile_cache: dict[tuple[int, int], bytes] | None = None
+    if local_path is not None:
+        logger.info("  preloading %d tiles into memory ...", total)
+        import zipfile as _zf
+
+        tile_cache = {}
+        with _zf.ZipFile(local_path) as zf:
+            for col, row in tile_coords:
+                path = f"{dzi_name}_files/{level}/{col}_{row}.{meta.format}"
+                try:
+                    tile_cache[(col, row)] = zf.read(path)
+                except KeyError:
+                    pass  # missing tile — process_tile will skip it
+        logger.info(
+            "  preloaded %d tiles (%.1f MB)",
+            len(tile_cache),
+            sum(len(v) for v in tile_cache.values()) / 1e6,
+        )
+
     errors: list[str] = []
     lock = threading.Lock()
     done_count: list[int] = [0]
@@ -378,7 +404,14 @@ def build_prediction_dzip(
 
     def process_tile(col: int, row: int) -> None:
         try:
-            tile_arr = src.get_tile(dzi_name, level, col, row, meta.format)
+            if tile_cache is not None:
+                raw = tile_cache.get((col, row))
+                if raw is None:
+                    return
+                img = Image.open(io.BytesIO(raw)).convert("RGB")
+                tile_arr = np.asarray(img, dtype=np.uint8)
+            else:
+                tile_arr = src.get_tile(dzi_name, level, col, row, meta.format)
             feat = extract_features(tile_arr, filters, scales)
             h, w = tile_arr.shape[:2]
             proba = clf.predict_proba(feat).reshape(h, w, -1)
@@ -398,9 +431,7 @@ def build_prediction_dzip(
                     eta = (total - n) / rate if rate > 0 else 0
                     logger.info("  tiles %d/%d  %.1f/s  ETA %.0fs", n, total, rate, eta)
 
-    tile_coords = [(c, r) for r in range(num_rows) for c in range(num_cols)]
-    # When reading locally: cap = workers (CPU-bound, no network limit)
-    # When reading remotely: cap at 128 (data-proxy rate-limits per token)
+    # When local: pure CPU — use all workers. Remote: cap at 128 (data-proxy throttle).
     cap = workers if local_path is not None else 128
     actual_workers = min(workers, total, cap)
     logger.info("  predicting %d tiles with %d workers", total, actual_workers)
