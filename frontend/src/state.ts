@@ -155,6 +155,9 @@ function _loadJobHistory(): HpcJobRecord[] {
 
 export const hpcJobHistory = signal<HpcJobRecord[]>(_loadJobHistory());
 
+// The most-recently submitted job being actively tracked (cleared when done/error)
+export const activeHpcJob = signal<HpcJobRecord | null>(null);
+
 export function addHpcJob(record: HpcJobRecord): void {
   const next = [record, ...hpcJobHistory.value].slice(0, 20); // keep last 20
   hpcJobHistory.value = next;

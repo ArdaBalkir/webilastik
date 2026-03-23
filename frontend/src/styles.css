@@ -748,3 +748,43 @@ select {
   border-radius: 4px;
   font-size: 11px;
 }
+
+/* -- JobStatusPanel -------------------------------------------------------- */
+.job-panel { gap: 6px; }
+
+.job-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px 8px;
+  border-radius: 4px;
+  border: 1px solid #333;
+  background: #1a1a1a;
+}
+.job-pending   { border-color: #555; }
+.job-running   { border-color: #3a6a8a; }
+.job-done      { border-color: #2a5a40; }
+.job-error     { border-color: #7a2020; }
+.job-cancelled { border-color: #555; opacity: 0.7; }
+
+.job-header { display: flex; align-items: center; gap: 6px; }
+.job-badge { font-size: 11px; white-space: nowrap; }
+
+.job-slurm {
+  font-size: 10px;
+  color: #888;
+  font-family: monospace;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-history { font-size: 11px; }
+.job-history summary { cursor: pointer; color: #888; padding: 2px 0; }
+.job-history summary:hover { color: #aaa; }
+
+.job-hist-row { display: flex; align-items: center; gap: 6px; padding: 3px 4px; border-radius: 3px; margin-top: 3px; }
+.job-hist-row:hover { background: #252525; }
+.job-time { font-size: 10px; color: #666; margin-left: auto; }
+.job-badge-sm { font-size: 10px; }

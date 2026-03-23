@@ -9,6 +9,7 @@ import { LabelPanel } from "./components/LabelPanel";
 import { FeaturePanel } from "./components/FeaturePanel";
 import { ControlBar } from "./components/ControlBar";
 import { DataPanel } from "./components/DataPanel";
+import { JobStatusPanel } from "./components/JobStatusPanel";
 import type { TrainRequest } from "./types";
 
 /** Parse URL query params once at startup into state signals. */
@@ -250,13 +251,15 @@ export function App() {
         p_source: srcDir,
         output_dir: outDir,
       });
-      state.exportStatus.value = `✅ SLURM ${res.slurm_job_id} submitted`;
-      state.addHpcJob({
+      const record = {
         job_id: res.job_id, slurm_job_id: res.slurm_job_id,
         slurm_state: res.slurm_state, status: res.status,
         p_source: res.p_source, output_dir: res.output_dir, log_path: res.log_path,
         created_at: Date.now(), annotated_images: 1,
-      });
+      };
+      state.addHpcJob(record);
+      state.activeHpcJob.value = record;
+      state.exportStatus.value = `✅ SLURM ${res.slurm_job_id} submitted`;
     } catch (err) {
       state.exportStatus.value = `❌ ${err}`;
     }
@@ -269,6 +272,7 @@ export function App() {
         <ControlBar onTrain={handleTrain} onExport={handleExport} />
         <LabelPanel />
         <FeaturePanel />
+        <JobStatusPanel />
       </aside>
       <div class="viewer-area" ref={viewerContainerRef} />
     </div>
