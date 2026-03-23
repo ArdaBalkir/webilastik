@@ -67,24 +67,12 @@ app.add_middleware(
 )
 
 # ── HPC SSH config ────────────────────────────────────────────────────────────
-# Only the SSH connection details vary per deployment; everything else is fixed.
+# Only connection details come from env — everything else is hardcoded in the script.
 HPC_HOST = os.environ.get("HPC_HOST", "")
 HPC_USER = os.environ.get("HPC_USER", "")
 HPC_SSH_KEY = os.environ.get("HPC_SSH_KEY", os.path.expanduser("~/.ssh/id_rsa"))
 HPC_SSH_PORT = 22
-
-# ── JSC / SLURM hardcoded constants ──────────────────────────────────────────
-HPC_ACCOUNT = "ebrains-0000003"
-HPC_PROJECT = "ebrains-0000003"
-HPC_PARTITION = "batch"
-HPC_CPUS = 128
-HPC_TIME = "02:00:00"
-HPC_CONDA_ENV = "webilastik2"
-HPC_CONDA_DIR = "/p/project1/ebrains-0000003/miniforge3"
-HPC_WEBILASTIK_DIR = "/p/project1/ebrains-0000003/webilastik"
-HPC_SCRATCH_DIR = "/p/scratch/ebrains-0000003"
-HPC_PREFETCH_DIR = "/p/scratch/ebrains-0000003/wi2_cache"
-_LOG_PATTERN = "/p/scratch/ebrains-0000003/wi2-run-{slurm_job_id}.log"
+HPC_CPUS = 128  # default workers; overridable per-request
 
 # ── In-memory job registry ────────────────────────────────────────────────────
 _jobs: Dict[str, dict] = {}
@@ -323,11 +311,7 @@ class HeadlessJobRequest(BaseModel):
     level: Optional[int] = None
     p_source: str
     output_dir: str
-    # SLURM overrides (all optional — defaults come from env vars)
-    partition: Optional[str] = None
-    cpus: Optional[int] = None
-    time_limit: Optional[str] = None
-    account: Optional[str] = None
+    cpus: Optional[int] = None  # override worker count, default 128
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -373,7 +357,7 @@ async def create_headless_job(
         raise HTTPException(500, f"sbatch submission failed: {e}")
 
     slurm_job_id = raw.split(";")[0].strip()
-    log_path = _LOG_PATTERN.format(slurm_job_id=slurm_job_id)
+    log_path = f"/p/scratch/ebrains-0000003/wi2-run-{slurm_job_id}.log"
     logger.info("Job %s → SLURM %s (user %s)", job_id, slurm_job_id, user_id)
 
     _jobs[job_id] = {
