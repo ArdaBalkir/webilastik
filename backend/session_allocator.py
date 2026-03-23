@@ -67,19 +67,24 @@ app.add_middleware(
 )
 
 # ── HPC SSH config ────────────────────────────────────────────────────────────
+# Only the SSH connection details vary per deployment; everything else is fixed.
 HPC_HOST = os.environ.get("HPC_HOST", "")
 HPC_USER = os.environ.get("HPC_USER", "")
 HPC_SSH_KEY = os.environ.get("HPC_SSH_KEY", os.path.expanduser("~/.ssh/id_rsa"))
-HPC_SSH_PORT = int(os.environ.get("HPC_SSH_PORT", "22"))
-HPC_ACCOUNT = os.environ.get("HPC_ACCOUNT", "")
+HPC_SSH_PORT = 22
 
-# SLURM defaults for the headless pipeline job
-HPC_PARTITION = os.environ.get("HPC_PARTITION", "cpu")
-HPC_CPUS = int(os.environ.get("HPC_CPUS", "64"))
-HPC_MEM = os.environ.get("HPC_MEM", "128G")
-HPC_TIME = os.environ.get("HPC_TIME", "08:00:00")
-HPC_ENV_ACTIVATE = os.environ.get("HPC_ENV_ACTIVATE", "~/wi2/.venv/bin/activate")
-HPC_SCRATCH_DIR = os.environ.get("HPC_SCRATCH_DIR", "/tmp")
+# ── JSC / SLURM hardcoded constants ──────────────────────────────────────────
+HPC_ACCOUNT = "ebrains-0000003"
+HPC_PROJECT = "ebrains-0000003"
+HPC_PARTITION = "batch"
+HPC_CPUS = 128
+HPC_TIME = "02:00:00"
+HPC_CONDA_ENV = "webilastik2"
+HPC_CONDA_DIR = "/p/project1/ebrains-0000003/miniforge3"
+HPC_WEBILASTIK_DIR = "/p/project1/ebrains-0000003/webilastik"
+HPC_SCRATCH_DIR = "/p/scratch/ebrains-0000003"
+HPC_PREFETCH_DIR = "/p/scratch/ebrains-0000003/wi2_cache"
+_LOG_PATTERN = "/p/scratch/ebrains-0000003/wi2-run-{slurm_job_id}.log"
 
 # ── In-memory job registry ────────────────────────────────────────────────────
 _jobs: Dict[str, dict] = {}
@@ -163,33 +168,34 @@ def _build_sbatch_script(
     level: Optional[int],
     token: Optional[str],
     cpus: int,
-    mem: str,
-    partition: str,
-    time_limit: str,
-    account: str,
-    log_path: str,
 ) -> str:
-    account_line = f"#SBATCH --account={account}" if account else ""
     level_flag = f"--level {level}" if level is not None else ""
     t_source_flag = f"--t-source '{t_source}'" if t_source else ""
     token_export = f"export WI2_TOKEN='{token}'" if token else "# no token"
     token_flag = "--token-env WI2_TOKEN" if token else ""
 
     return f"""#!/bin/bash
-#SBATCH --job-name=wi2-hl-{job_id[:8]}
-#SBATCH --partition={partition}
-{account_line}
+#SBATCH --job-name=wi2-run
+#SBATCH --partition=batch
+#SBATCH --account=ebrains-0000003
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={cpus}
-#SBATCH --mem={mem}
-#SBATCH --time={time_limit}
-#SBATCH --output={log_path}
-#SBATCH --export=NONE
+#SBATCH --time=02:00:00
+#SBATCH --output=/p/scratch/ebrains-0000003/wi2-run-%j.log
+#SBATCH --error=/p/scratch/ebrains-0000003/wi2-run-%j.log
+
+jutil env activate -p ebrains-0000003
+
+set -euo pipefail
 
 # ── Environment ───────────────────────────────────────────────────────────────
-mamba activate webilastik2
+source /p/project1/ebrains-0000003/miniforge3/etc/profile.d/conda.sh
+conda activate webilastik2
+
 export PYTHONUNBUFFERED=1
+export PYTHONPATH=/p/project1/ebrains-0000003/webilastik
+export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export NUMEXPR_MAX_THREADS=$SLURM_CPUS_PER_TASK
@@ -197,12 +203,12 @@ export NUMEXPR_MAX_THREADS=$SLURM_CPUS_PER_TASK
 
 echo "[wi2] =================================================="
 echo "[wi2] Job {job_id} starting on $(hostname) at $(date)"
-echo "[wi2] SLURM CPUs: $SLURM_CPUS_PER_TASK  MEM: {mem}"
+echo "[wi2] SLURM CPUs: $SLURM_CPUS_PER_TASK"
 echo "[wi2] p_source:   {p_source}"
 echo "[wi2] output_dir: {output_dir}"
 echo "[wi2] =================================================="
 
-srun --cpus-per-task=$SLURM_CPUS_PER_TASK \\
+srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
     python -m backend.headless_cli run \\
         --annotations-b64 '{annotations_b64}' \\
         {t_source_flag} \\
@@ -211,6 +217,16 @@ srun --cpus-per-task=$SLURM_CPUS_PER_TASK \\
         --features '{features_json}' \\
         {level_flag} \\
         {token_flag} \\
+        --prefetch-dir /p/scratch/ebrains-0000003/wi2_cache \\
+        --workers $SLURM_CPUS_PER_TASK
+
+EXIT_CODE=$?
+echo "[wi2] Pipeline finished with exit code $EXIT_CODE at $(date)"
+exit $EXIT_CODE
+"""
+        {level_flag} \\
+        {token_flag} \\
+        {prefetch_flag} \\
         --workers $SLURM_CPUS_PER_TASK
 
 EXIT_CODE=$?
@@ -307,12 +323,11 @@ class HeadlessJobRequest(BaseModel):
     level: Optional[int] = None
     p_source: str
     output_dir: str
-    # SLURM overrides
+    # SLURM overrides (all optional — defaults come from env vars)
     partition: Optional[str] = None
     cpus: Optional[int] = None
-    mem: Optional[str] = None
-    time_limit: Optional[str] = None  # t_source * 5 mins or so, terminates when done
-    account: Optional[str] = None  # ebrains-0003
+    time_limit: Optional[str] = None
+    account: Optional[str] = None
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -331,13 +346,14 @@ async def create_headless_job(
     user_id = _auth(authorization)
     token = _raw_token(authorization)
     job_id = str(uuid.uuid4())
-    log_path = f"{HPC_SCRATCH_DIR}/wi2-{job_id[:8]}.log"
 
     ann_b64 = base64.b64encode(
         json.dumps(req.annotations, separators=(",", ":")).encode()
     ).decode()
     features_json = json.dumps(req.features, separators=(",", ":"))
 
+    # Use SLURM's %j placeholder so the log file name contains the real job ID.
+    # We resolve the actual path after sbatch returns the numeric job ID.
     script = _build_sbatch_script(
         job_id=job_id,
         annotations_b64=ann_b64,
@@ -348,11 +364,6 @@ async def create_headless_job(
         level=req.level,
         token=token,
         cpus=req.cpus or HPC_CPUS,
-        mem=req.mem or HPC_MEM,
-        partition=req.partition or HPC_PARTITION,
-        time_limit=req.time_limit or HPC_TIME,
-        account=req.account or HPC_ACCOUNT,
-        log_path=log_path,
     )
 
     try:
@@ -362,13 +373,14 @@ async def create_headless_job(
         raise HTTPException(500, f"sbatch submission failed: {e}")
 
     slurm_job_id = raw.split(";")[0].strip()
+    log_path = _LOG_PATTERN.format(slurm_job_id=slurm_job_id)
     logger.info("Job %s → SLURM %s (user %s)", job_id, slurm_job_id, user_id)
 
     _jobs[job_id] = {
         "job_id": job_id,
         "user_id": user_id,
         "slurm_job_id": slurm_job_id,
-        "slurm_state": "PENDING",  # This likely is "PD" in squeue
+        "slurm_state": "PENDING",
         "status": "pending",
         "p_source": req.p_source,
         "output_dir": req.output_dir,
