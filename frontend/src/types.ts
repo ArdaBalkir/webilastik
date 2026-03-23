@@ -75,6 +75,21 @@ export interface TrainRequest {
   };
 }
 
+export interface TrainMultiRequest {
+  /** Same structure as the exported annotations JSON — works for 1 or N images. */
+  annotations: Array<{
+    dzip_url: string;
+    strokes: Array<{
+      label: number;
+      points: Array<[number, number]>;
+    }>;
+  }>;
+  features: {
+    filters: string[];
+    scales: number[];
+  };
+}
+
 export interface TrainResponse {
   classifier_id: string;
   num_classes: number;
@@ -122,6 +137,19 @@ export interface BatchExportStatus {
   failed: Array<{ name: string; error: string }>;
   current?: string;
   error?: string;
+}
+
+// ── HPC job history record (stored in localStorage) ──────────────────────────
+export interface HpcJobRecord {
+  job_id: string;
+  slurm_job_id: string;
+  slurm_state: string;
+  status: "pending" | "running" | "done" | "error" | "cancelled";
+  p_source: string;
+  output_dir: string;
+  log_path: string;
+  created_at: number; // unix ms
+  annotated_images: number;
 }
 
 // ── Headless run ──────────────────────────────────────────────────────────────

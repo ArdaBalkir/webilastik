@@ -89,6 +89,28 @@ body {
 .btn-train:hover:not(:disabled) { background: #239e8e; }
 .btn-train.loading { background: #115f55; }
 
+.btn-export {
+  background: #2a5c8a;
+  border-color: #5aa0d0;
+  color: #fff;
+  width: 100%;
+  padding: 7px;
+  font-weight: 600;
+}
+.btn-export:hover:not(:disabled) { background: #3470a8; }
+.btn-export:disabled { opacity: 0.4; cursor: default; }
+
+/* ── Inline source picker ────────────────────────────────────────────────── */
+.source-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 6px;
+  background: #1a1a1a;
+}
+
 .btn-sm {
   padding: 3px 8px;
   border: 1px solid #444;
@@ -442,19 +464,112 @@ select {
   background: #3dd6c0;
 }
 
-/* ── Batch / HPC job UI ──────────────────────────────────────────────────── */
-.batch-progress { display: flex; flex-direction: column; gap: 4px; }
-
+/* ── HPC job panel ───────────────────────────────────────────────────────── */
 .hpc-job-info {
   display: flex;
   flex-direction: column;
   gap: 4px;
-  margin-top: 6px;
+  margin-top: 4px;
   padding: 6px 8px;
   background: #1a1a1a;
-  border-radius: 6px;
+  border-radius: 4px;
   border: 1px solid #333;
 }
+
+.job-log {
+  font-family: "Fira Mono", "Courier New", monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #b0ffb0;
+  background: #0d0d0d;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 4px;
+}
+
+.progress-bar-bg {
+  height: 6px;
+  background: #333;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  background: #3dd6c0;
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+/* ── HPC health indicator dots ───────────────────────────────────────────── */
+.hpc-header-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.dot-online, .dot-offline, .dot-checking {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.dot-online   { background: #3dd6c0; box-shadow: 0 0 5px #3dd6c0; }
+.dot-offline  { background: #ff5555; }
+.dot-checking { background: #888; animation: blink 1s infinite; }
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
+
+/* ── Job history ─────────────────────────────────────────────────────────── */
+.job-count-badge {
+  background: #1e3330;
+  color: #3dd6c0;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  min-width: 16px;
+  text-align: center;
+}
+
+.job-history-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.job-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* ── Source browser annotation dot ──────────────────────────────────────── */
+.dot-annotated {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3dd6c0;
+}
+
 
 .job-log {
   font-family: "Fira Mono", "Courier New", monospace;
@@ -484,4 +599,152 @@ select {
   background: #3dd6c0;
   border-radius: 3px;
   transition: width 0.3s ease;
+}
+
+/* ── HPC job panel ───────────────────────────────────────────────────────── */
+.hpc-job-info {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border-radius: 4px;
+  border: 1px solid #333;
+}
+
+.job-log {
+  font-family: "Fira Mono", "Courier New", monospace;
+  font-size: 10px;
+  line-height: 1.4;
+  color: #b0ffb0;
+  background: #0d0d0d;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  padding: 6px 8px;
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  margin-top: 4px;
+}
+
+/* ── HPC health indicator dots ───────────────────────────────────────────── */
+.hpc-header-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.dot-online, .dot-offline, .dot-checking {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.dot-online   { background: #3dd6c0; box-shadow: 0 0 5px #3dd6c0; }
+.dot-offline  { background: #ff5555; }
+.dot-checking { background: #888; animation: blink 1s infinite; }
+
+@keyframes blink {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.25; }
+}
+
+/* ── Job history ─────────────────────────────────────────────────────────── */
+.job-count-badge {
+  background: #1e3330;
+  color: #3dd6c0;
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 8px;
+  min-width: 16px;
+  text-align: center;
+}
+
+.job-history-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.job-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  font-size: 11px;
+}
+
+/* ── Source browser annotation dot ──────────────────────────────────────── */
+.dot-annotated {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3dd6c0;
+}
+
+
+/* ── HPC health dots ─────────────────────────────────────────────────────── */
+.hpc-header-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.dot-online, .dot-offline, .dot-checking {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+.dot-online    { background: #3dd6c0; box-shadow: 0 0 4px #3dd6c0; }
+.dot-offline   { background: #ff5555; }
+.dot-checking  { background: #888; animation: pulse 1s infinite; }
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.3; }
+}
+
+/* ── Job history list ────────────────────────────────────────────────────── */
+.job-count-badge {
+  background: #2a4a47;
+  color: #3dd6c0;
+  font-size: 9px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  font-weight: 700;
+  min-width: 16px;
+  text-align: center;
+}
+
+.job-history-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.job-history-item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  font-size: 11px;
 }

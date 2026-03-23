@@ -571,24 +571,25 @@ def run(
         return 1
     logger.info("Found %d images to process", total)
 
-    # ── 2.5 Prefetch (optional) ───────────────────────────────────────────────
-    local_cache: dict[str, pathlib.Path] = {}
-    if prefetch_dir is not None:
-        logger.info("=" * 60)
-        logger.info("PHASE 2.5 — PREFETCH to %s", prefetch_dir)
-        logger.info("=" * 60)
-        local_cache = prefetch_sources(sources, prefetch_dir, token, workers)
-        logger.info("Prefetch complete: %d files", len(local_cache))
+    # ── 2.5 Prefetch — always download DZIPs locally before prediction ─────────
+    # Reading tiles tile-by-tile from data-proxy during prediction is throttled
+    # to ~6-7 tiles/s per token.  Downloading the whole DZIP first lets the
+    # predict step run fully CPU-bound from local disk (much faster).
+    # If the caller supplied an explicit prefetch_dir (e.g. /scratch), reuse it
+    # across jobs and skip re-downloads.  Otherwise we use a throwaway tmpdir.
+    _own_prefetch_dir = prefetch_dir is None
+    if _own_prefetch_dir:
+        prefetch_dir = pathlib.Path(tempfile.mkdtemp(prefix="wi2_dl_"))
+
+    logger.info("=" * 60)
+    logger.info("PHASE 2.5 — PREFETCH to %s", prefetch_dir)
+    logger.info("=" * 60)
+    local_cache = prefetch_sources(sources, prefetch_dir, token, workers)
+    logger.info("Prefetch complete: %d files", len(local_cache))
 
     # ── 3. Predict + upload each image ────────────────────────────────────────
-    # Sequential: data-proxy caps total throughput per token to ~6-7 tiles/s.
-    # With --prefetch-dir tiles are read from local disk — fully CPU-bound.
     logger.info("=" * 60)
-    logger.info(
-        "PHASE 3 — BATCH EXPORT  (%d workers per image%s)",
-        workers,
-        ", local disk" if prefetch_dir else "",
-    )
+    logger.info("PHASE 3 — BATCH EXPORT  (%d workers per image, local disk)", workers)
     logger.info("=" * 60)
     output_base = output_dir.rstrip("/")
     failed: list[str] = []
@@ -632,6 +633,10 @@ def run(
     if failed:
         logger.error("Failed images: %s", ", ".join(failed))
     logger.info("=" * 60)
+
+    if _own_prefetch_dir and prefetch_dir is not None:
+        shutil.rmtree(prefetch_dir, ignore_errors=True)
+
     return 0 if not failed else 1
 
 

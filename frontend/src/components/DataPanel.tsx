@@ -1,10 +1,9 @@
-import { h, Fragment } from "preact";
+import { h } from "preact";
 import { useSignal } from "@preact/signals";
 import * as state from "../state";
 import { saveProject, loadProject } from "../state";
-import { ApiClient, featureConfigToFilters } from "../api";
-import type { ExportRequest } from "../types";
-import { DataProxyDialog } from "./DataProxyDialog";
+import { ApiClient } from "../api";
+import type { SourceEntry } from "../types";
 
 interface Props {
   onLoad: (url: string) => Promise<void>;
@@ -17,16 +16,13 @@ export function DataPanel({ onLoad }: Props) {
   const meta = state.dziMeta;
   const resolution = state.workLevelOffset;
 
-  // Export state
-  const outputUrl = useSignal("");
-  const showDialog = useSignal(false);
-  const uploading = useSignal(false);
-  const uploadMsg = useSignal("");
+  // Inline source browser
+  const showBrowse = useSignal(false);
+  const browseSources = useSignal<SourceEntry[]>([]);
+  const browseLoading = useSignal(false);
+  const browseError = useSignal("");
 
   function normalizeUrl(raw: string): string {
-    // Auto-fix common EBRAINS data-proxy URL mistake: missing /v1/buckets/
-    // Wrong: https://data-proxy.ebrains.eu/api/my-bucket/path/file.dzip
-    // Right: https://data-proxy.ebrains.eu/api/v1/buckets/my-bucket/path/file.dzip
     return raw.replace(
       /^(https?:\/\/data-proxy\.ebrains\.eu\/api\/)(?!v1\/buckets\/)(.+)$/,
       "$1v1/buckets/$2",
@@ -44,8 +40,7 @@ export function DataPanel({ onLoad }: Props) {
     const input = e.target as HTMLInputElement;
     const file = input.files?.[0];
     if (!file) return;
-    const url = URL.createObjectURL(file);
-    loadUrl(url);
+    loadUrl(URL.createObjectURL(file));
   }
 
   function handleProjectLoad(e: Event) {
@@ -55,63 +50,20 @@ export function DataPanel({ onLoad }: Props) {
     loadProject(file).then(() => onLoad(state.dziUrl.value));
   }
 
-  function buildExportReq(destUrl?: string): ExportRequest | null {
-    const cid = state.classifierId.value;
-    const wl = state.workLevel.value;
-    const m = state.dziMeta.value;
-    if (!cid || wl === null || !m) return null;
-    const fc = state.featureConfig.value;
-    return {
-      classifier_id: cid,
-      dzip_url: state.dziUrl.value,
-      dzi_name: state.dziName.value,
-      level: wl,
-      features: { filters: featureConfigToFilters(fc), scales: fc.scales },
-      ...(destUrl ? { output_url: destUrl } : {}),
-    };
-  }
-
-  async function handleDownload() {
-    const req = buildExportReq();
-    if (!req) {
-      uploadMsg.value = "Train a classifier first.";
-      return;
-    }
-    uploadMsg.value = "Building DZIP…";
+  async function openBrowse() {
+    showBrowse.value = true;
+    const dir = state.sourceDir.value;
+    if (!dir) { browseError.value = "Set ?workdir= in the URL first."; return; }
+    browseLoading.value = true;
+    browseError.value = "";
     try {
-      await new ApiClient(
-        state.serverUrl.value,
-        state.bearerToken.value,
-      ).exportZipDownload(req);
-      uploadMsg.value = "Downloaded!";
+      browseSources.value = await new ApiClient(
+        state.serverUrl.value, state.bearerToken.value,
+      ).listSources(dir);
     } catch (e) {
-      uploadMsg.value = `Error: ${e}`;
+      browseError.value = String(e);
     }
-  }
-
-  async function handleUpload() {
-    const dest = outputUrl.value.trim();
-    if (!dest) {
-      uploadMsg.value = "Set a destination URL or browse first.";
-      return;
-    }
-    const req = buildExportReq(dest);
-    if (!req) {
-      uploadMsg.value = "Train a classifier first.";
-      return;
-    }
-    uploading.value = true;
-    uploadMsg.value = "Uploading…";
-    try {
-      const res = await new ApiClient(
-        state.serverUrl.value,
-        state.bearerToken.value,
-      ).exportZipUpload(req);
-      uploadMsg.value = `✓ ${res.url} (${(res.size / 1024 / 1024).toFixed(1)} MB)`;
-    } catch (e) {
-      uploadMsg.value = `Error: ${e}`;
-    }
-    uploading.value = false;
+    browseLoading.value = false;
   }
 
   return (
@@ -145,7 +97,33 @@ export function DataPanel({ onLoad }: Props) {
           Local file…{" "}
           <input type="file" accept=".dzip,.zip" onChange={handleFileInput} />
         </label>
+        <button class="btn-sm" onClick={openBrowse}>Browse…</button>
       </div>
+
+      {/* Inline source picker */}
+      {showBrowse.value && (
+        <div class="source-picker">
+          <div class="row" style={{ justifyContent: "space-between" }}>
+            <span class="hint" style={{ wordBreak: "break-all" }}>
+              {state.sourceDir.value || "(no workdir set)"}
+            </span>
+            <button class="btn-icon" onClick={() => (showBrowse.value = false)}>×</button>
+          </div>
+          {browseLoading.value && <p class="status">Loading…</p>}
+          {browseError.value && <p class="status error">{browseError.value}</p>}
+          <ul class="source-list">
+            {browseSources.value.map((s) => (
+              <li
+                key={s.object_url}
+                class={`source-item${state.dziUrl.value === s.object_url ? " active" : ""}`}
+                onClick={() => { showBrowse.value = false; loadUrl(s.object_url); }}
+              >
+                <span class="source-name">{s.name}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {loading.value && <p class="status">Loading…</p>}
       {error.value && <p class="error">{error.value}</p>}
@@ -185,9 +163,7 @@ export function DataPanel({ onLoad }: Props) {
       )}
 
       <div class="row divider-row">
-        <button class="btn-sm" onClick={saveProject}>
-          Save project
-        </button>
+        <button class="btn-sm" onClick={saveProject}>Save project</button>
         <label class="btn-sm btn-file">
           Load project…
           <input type="file" accept=".json" onChange={handleProjectLoad} />
@@ -195,14 +171,12 @@ export function DataPanel({ onLoad }: Props) {
       </div>
 
       <div class="row">
-        <label>Compute server:</label>
+        <label>Server:</label>
         <input
           class="input-url"
           type="text"
           value={state.serverUrl.value}
-          onInput={(e) =>
-            (state.serverUrl.value = (e.target as HTMLInputElement).value)
-          }
+          onInput={(e) => (state.serverUrl.value = (e.target as HTMLInputElement).value)}
         />
       </div>
 
@@ -213,61 +187,9 @@ export function DataPanel({ onLoad }: Props) {
           type="password"
           placeholder="Bearer token"
           value={state.bearerToken.value}
-          onInput={(e) =>
-            (state.bearerToken.value = (e.target as HTMLInputElement).value)
-          }
+          onInput={(e) => (state.bearerToken.value = (e.target as HTMLInputElement).value)}
         />
       </div>
-
-      {/* ── Export ────────────────────────────────────────────────────────── */}
-      <div class="row divider-row">
-        <label>Export predictions (DZIP)</label>
-      </div>
-      <div class="row">
-        <input
-          class="input-url"
-          type="text"
-          value={outputUrl.value}
-          placeholder="data-proxy URL or blank → download"
-          onInput={(e: Event) =>
-            (outputUrl.value = (e.target as HTMLInputElement).value)
-          }
-        />
-        <button
-          class="btn-sm"
-          title="Browse EBRAINS buckets"
-          onClick={() => (showDialog.value = true)}
-        >
-          …
-        </button>
-      </div>
-      <div class="row">
-        <button
-          class="btn-sm"
-          onClick={handleDownload}
-          disabled={state.trainingStatus.value !== "ready"}
-        >
-          ⬇ Download
-        </button>
-        <button
-          class="btn-sm"
-          onClick={handleUpload}
-          disabled={state.trainingStatus.value !== "ready" || uploading.value}
-        >
-          {uploading.value ? "Uploading…" : "⬆ Upload to EBRAINS"}
-        </button>
-      </div>
-      {uploadMsg.value && <p class="status">{uploadMsg.value}</p>}
-
-      {showDialog.value && (
-        <DataProxyDialog
-          token={state.bearerToken.value}
-          onSelect={(url) => {
-            outputUrl.value = url;
-          }}
-          onClose={() => (showDialog.value = false)}
-        />
-      )}
     </section>
   );
 }

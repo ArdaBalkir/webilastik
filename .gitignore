@@ -1,6 +1,5 @@
 # Excluded from repo
 webilastik/
-dzip_helper.ts
 project-plan.md
 storage.json
 
@@ -13,6 +12,7 @@ __pycache__/
 dist/
 build/
 .pytest_cache/
+*.pkl
 
 # Node
 frontend/node_modules/

@@ -41,6 +41,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, Header, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
@@ -57,12 +58,23 @@ logger = logging.getLogger(__name__)
 # ── App ───────────────────────────────────────────────────────────────────────
 app = FastAPI(title="Webilastik 2.0 Compute Server", version="2.0.0")
 
+_PROD_ORIGINS = os.environ.get(
+    "CORS_ORIGINS",
+    "https://app.ilastik.org,http://localhost:5173,http://localhost:8000",
+).split(",")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_PROD_ORIGINS,
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Serve frontend static files when dist/ exists (production mode)
+_DIST = pathlib.Path(__file__).parent.parent / "dist"
+if _DIST.is_dir():
+    app.mount("/app", StaticFiles(directory=str(_DIST), html=True), name="ui")
 
 # ── Process pool for CPU-bound work ──────────────────────────────────────────
 _executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
@@ -301,6 +313,21 @@ class TrainResponse(BaseModel):
     num_classes: int
 
 
+# Multi-image training — matches the annotations JSON format exactly
+class AnnotationImage(BaseModel):
+    """One annotated image. Matches {dzip_url, strokes} annotations JSON entry."""
+
+    dzip_url: str
+    strokes: List[StrokeData]
+
+
+class TrainMultiRequest(BaseModel):
+    """Train a single classifier from strokes across multiple images."""
+
+    annotations: List[AnnotationImage]
+    features: FeatureSpec
+
+
 class ExportRequest(BaseModel):
     classifier_id: str
     dzip_url: str
@@ -439,6 +466,83 @@ async def train(
         return clf_id, clf.n_classes
 
     clf_id, n_classes = await _run(_train)
+    return TrainResponse(classifier_id=clf_id, num_classes=n_classes)
+
+
+@app.post("/train-multi", response_model=TrainResponse)
+async def train_multi(
+    req: TrainMultiRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """Train a classifier from annotations across multiple images."""
+    user = _auth(authorization)
+    total_strokes = sum(len(a.strokes) for a in req.annotations)
+    logger.info(
+        "TrainMulti from %s: %d images, %d strokes total",
+        user.get("sub"),
+        len(req.annotations),
+        total_strokes,
+    )
+
+    def _train_multi() -> tuple[str, int]:
+        from collections import defaultdict
+
+        X_list: list[np.ndarray] = []
+        y_list: list[int] = []
+
+        for ann in req.annotations:
+            dzip = _get_dzip(ann.dzip_url, authorization)
+            dzi_name, meta = dzip.find_dzi()  # resolve name + level from the DZIP
+            level = meta.max_level
+            scale = 2 ** (level - meta.max_level)  # always 1.0 at max_level
+            lw = max(1, round(meta.width * scale))
+            lh = max(1, round(meta.height * scale))
+            ts = meta.tile_size
+            ol = meta.overlap
+
+            tile_pts: dict[tuple[int, int], list[tuple[int, int, int]]] = defaultdict(
+                list
+            )
+            for stroke in ann.strokes:
+                for x, y in stroke.points:
+                    lx = min(max(0, x), lw - 1)
+                    ly = min(max(0, y), lh - 1)
+                    col = lx // ts
+                    row = ly // ts
+                    tx = lx - col * ts + (ol if col > 0 else 0)
+                    ty = ly - row * ts + (ol if row > 0 else 0)
+                    tile_pts[(col, row)].append((tx, ty, stroke.label))
+
+            for (col, row), pts in tile_pts.items():
+                try:
+                    tile_arr = dzip.get_tile(dzi_name, level, col, row, meta.format)
+                except Exception as e:
+                    logger.warning(
+                        "Skipping tile %d/%d in %s: %s", col, row, ann.dzip_url, e
+                    )
+                    continue
+                h, w = tile_arr.shape[:2]
+                feat = extract_features(
+                    tile_arr, req.features.filters, req.features.scales
+                )
+                for tx, ty, label in pts:
+                    if 0 <= ty < h and 0 <= tx < w:
+                        X_list.append(feat[ty * w + tx])
+                        y_list.append(label)
+
+        if not X_list:
+            raise ValueError("No valid annotated pixels found across all images")
+
+        X = np.stack(X_list).astype(np.float32)
+        y = np.array(y_list, dtype=np.int32)
+        logger.info("TrainMulti RF on %d samples, %d features", *X.shape)
+        clf = Classifier()
+        clf.fit(X, y)
+        clf_id = str(uuid.uuid4())
+        _classifiers[clf_id] = clf
+        return clf_id, clf.n_classes
+
+    clf_id, n_classes = await _run(_train_multi)
     return TrainResponse(classifier_id=clf_id, num_classes=n_classes)
 
 

@@ -3,31 +3,25 @@ import { useEffect, useRef } from "preact/hooks";
 import { useSignal, useComputed } from "@preact/signals";
 import { DziViewer } from "./dzi_viewer";
 import { BrushingCanvas, PredictionOverlay } from "./brushing_canvas";
-import { ApiClient, featureConfigToFilters } from "./api";
+import { ApiClient, SessionAllocatorClient, featureConfigToFilters } from "./api";
 import * as state from "./state";
 import { LabelPanel } from "./components/LabelPanel";
 import { FeaturePanel } from "./components/FeaturePanel";
 import { ControlBar } from "./components/ControlBar";
 import { DataPanel } from "./components/DataPanel";
-import { SourceBrowser } from "./components/SourceBrowser";
-import { ExportPanel } from "./components/ExportPanel";
 import type { TrainRequest } from "./types";
 
 /** Parse URL query params once at startup into state signals. */
 function readUrlParams() {
   const p = new URLSearchParams(window.location.search);
-  const tSrc = p.get("t_source");
-  const pSrc = p.get("p_source");
-  const outDir = p.get("output_dir");
+  const workdir = p.get("workdir");
   const token = p.get("token");
   const server = p.get("server");
-  if (tSrc) state.tSourceUrl.value = tSrc;
-  if (pSrc) state.pSourceUrl.value = pSrc;
-  if (outDir) state.outputDirUrl.value = outDir;
+  const allocator = p.get("allocator");
+  if (workdir) state.workdir.value = workdir;
   if (token) state.bearerToken.value = token;
   if (server) state.serverUrl.value = server;
-  // If t_source looks like a single DZIP (not a dir), seed dziUrl
-  if (tSrc && tSrc.endsWith(".dzip")) state.dziUrl.value = tSrc;
+  if (allocator) state.allocatorUrl.value = allocator;
 }
 
 export function App() {
@@ -197,29 +191,19 @@ export function App() {
     const level = state.workLevel.value ?? meta.maxLevel;
     const fc = state.featureConfig.value;
     const filters = featureConfigToFilters(fc);
-    if (filters.length === 0) {
-      alert("Select at least one feature filter.");
-      return;
-    }
+    if (filters.length === 0) { alert("Select at least one feature filter."); return; }
     const strokes = state.strokes.value;
-    if (strokes.length === 0) {
-      alert("Add some brush strokes first.");
-      return;
-    }
+    if (strokes.length === 0) { alert("Add some brush strokes first."); return; }
 
     const req: TrainRequest = {
       dzip_url: state.dziUrl.value,
       dzi_name: state.dziName.value,
       level,
-      strokes: strokes.map((s: (typeof strokes)[0]) => ({
+      strokes: strokes.map((s) => ({
         label: s.labelId,
-        // Rescale points from the stroke's capture level to the working level
         points: s.points.map(([x, y]) => {
-          const factor = Math.pow(2, level - s.level);
-          return [Math.round(x * factor), Math.round(y * factor)] as [
-            number,
-            number,
-          ];
+          const f = Math.pow(2, level - s.level);
+          return [Math.round(x * f), Math.round(y * f)] as [number, number];
         }),
       })),
       features: { filters, scales: fc.scales },
@@ -228,10 +212,7 @@ export function App() {
     state.trainingStatus.value = "training";
     state.trainingError.value = "";
     try {
-      const client = new ApiClient(
-        state.serverUrl.value,
-        state.bearerToken.value,
-      );
+      const client = new ApiClient(state.serverUrl.value, state.bearerToken.value);
       const res = await client.train(req);
       state.classifierId.value = res.classifier_id;
       state.numClasses.value = res.num_classes;
@@ -244,15 +225,50 @@ export function App() {
     }
   }
 
+  async function handleExport() {
+    const outDir = state.outputDir.value;
+    const srcDir = state.sourceDir.value;
+    if (!outDir || !srcDir) {
+      alert("Set ?workdir= in the URL to enable HPC export.");
+      return;
+    }
+    const strokes = state.strokes.value;
+    if (strokes.length === 0) { alert("No annotations — paint strokes first."); return; }
+
+    const fc = state.featureConfig.value;
+    state.exportStatus.value = "submitting";
+    try {
+      const client = new SessionAllocatorClient(
+        state.allocatorUrl.value, state.bearerToken.value,
+      );
+      const res = await client.submitHeadlessJob({
+        annotations: [{
+          dzip_url: state.dziUrl.value,
+          strokes: strokes.map((s) => ({ label: s.labelId, points: s.points })),
+        }],
+        features: { filters: featureConfigToFilters(fc), scales: fc.scales },
+        p_source: srcDir,
+        output_dir: outDir,
+      });
+      state.exportStatus.value = `✅ SLURM ${res.slurm_job_id} submitted`;
+      state.addHpcJob({
+        job_id: res.job_id, slurm_job_id: res.slurm_job_id,
+        slurm_state: res.slurm_state, status: res.status,
+        p_source: res.p_source, output_dir: res.output_dir, log_path: res.log_path,
+        created_at: Date.now(), annotated_images: 1,
+      });
+    } catch (err) {
+      state.exportStatus.value = `❌ ${err}`;
+    }
+  }
+
   return (
     <div class="app-root">
       <aside class="sidebar">
-        <SourceBrowser onLoad={handleLoadImage} />
         <DataPanel onLoad={handleLoadImage} />
-        <ControlBar onTrain={handleTrain} />
+        <ControlBar onTrain={handleTrain} onExport={handleExport} />
         <LabelPanel />
         <FeaturePanel />
-        <ExportPanel />
       </aside>
       <div class="viewer-area" ref={viewerContainerRef} />
     </div>

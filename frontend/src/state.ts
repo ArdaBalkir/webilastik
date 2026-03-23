@@ -7,6 +7,7 @@ import type {
   Project,
   SourceEntry,
   BatchExportStatus,
+  HpcJobRecord,
 } from "./types";
 import { DEFAULT_FEATURE_CONFIG } from "./types";
 
@@ -71,9 +72,22 @@ export const workLevel = computed(() => {
 export const trainedLevel = signal<number | null>(null);
 
 // ── URL param-seeded values (set once at startup by app.tsx) ───────────────
-export const tSourceUrl = signal<string>(""); // ?t_source= training dir / DZIP URL
-export const pSourceUrl = signal<string>(""); // ?p_source= export dir URL
-export const outputDirUrl = signal<string>(""); // ?output_dir= destination dir URL
+// ?workdir=https://…/bucket/project/  →  source= workdir/zipped_images/
+//                                         output= workdir/segmentations/
+export const workdir = signal<string>("");
+export const sourceDir = computed(() => {
+  const w = workdir.value.replace(/\/$/, "");
+  return w ? `${w}/zipped_images/` : "";
+});
+export const outputDir = computed(() => {
+  const w = workdir.value.replace(/\/$/, "");
+  return w ? `${w}/segmentations/` : "";
+});
+
+// Kept for backward-compat with old ?t_source= / ?p_source= params
+export const tSourceUrl = signal<string>("");
+export const pSourceUrl = signal<string>("");
+export const outputDirUrl = signal<string>("");
 
 // Allocator URL — points at session_allocator.py (port 8001 by default)
 export const allocatorUrl = signal<string>(
@@ -89,6 +103,32 @@ export const trainingSourcesError = signal<string>("");
 // Per-image strokes keyed by object_url — persists annotations across image switches
 export const strokesBySource = signal<Record<string, Stroke[]>>({});
 
+/** Total stroke count across all annotated images (including current). */
+export const totalAnnotatedStrokes = computed(() => {
+  const bySource = strokesBySource.value;
+  const current = strokes.value;
+  const currentUrl = dziUrl.value;
+  let total = current.length;
+  for (const [url, ss] of Object.entries(bySource)) {
+    if (url !== currentUrl) total += ss.length;
+  }
+  return total;
+});
+
+/** Number of distinct images with at least one stroke. */
+export const annotatedImageCount = computed(() => {
+  const bySource = strokesBySource.value;
+  const currentUrl = dziUrl.value;
+  const hasCurrentStrokes = strokes.value.length > 0;
+  const set = new Set(
+    Object.entries(bySource)
+      .filter(([url, ss]) => ss.length > 0 && url !== currentUrl)
+      .map(([url]) => url),
+  );
+  if (hasCurrentStrokes && currentUrl) set.add(currentUrl);
+  return set.size;
+});
+
 /** Switch the active image for annotation. Saves + restores strokes. */
 export function switchTrainingSource(objectUrl: string) {
   // Save current strokes under current dziUrl
@@ -101,6 +141,36 @@ export function switchTrainingSource(objectUrl: string) {
   // Restore strokes for new source
   strokes.value = strokesBySource.value[objectUrl] ?? [];
 }
+
+// ── HPC job history (persisted to localStorage) ───────────────────────────
+const _JOB_HISTORY_KEY = "wi2_hpc_jobs";
+
+function _loadJobHistory(): HpcJobRecord[] {
+  try {
+    return JSON.parse(localStorage.getItem(_JOB_HISTORY_KEY) ?? "[]");
+  } catch {
+    return [];
+  }
+}
+
+export const hpcJobHistory = signal<HpcJobRecord[]>(_loadJobHistory());
+
+export function addHpcJob(record: HpcJobRecord): void {
+  const next = [record, ...hpcJobHistory.value].slice(0, 20); // keep last 20
+  hpcJobHistory.value = next;
+  localStorage.setItem(_JOB_HISTORY_KEY, JSON.stringify(next));
+}
+
+export function updateHpcJob(jobId: string, patch: Partial<HpcJobRecord>): void {
+  const next = hpcJobHistory.value.map((r) =>
+    r.job_id === jobId ? { ...r, ...patch } : r,
+  );
+  hpcJobHistory.value = next;
+  localStorage.setItem(_JOB_HISTORY_KEY, JSON.stringify(next));
+}
+
+// ── HPC / allocator availability ──────────────────────────────────────────
+export const hpcAvailable = signal<boolean | null>(null); // null = unknown
 
 // ── Batch export state ────────────────────────────────────────────────────
 export const batchJobId = signal<string | null>(null);

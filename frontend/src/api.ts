@@ -1,6 +1,7 @@
 import type {
   DziInfoResponse,
   TrainRequest,
+  TrainMultiRequest,
   TrainResponse,
   ExportRequest,
   ExportStatus,
@@ -61,6 +62,11 @@ export class ApiClient {
   /** Send annotations + feature config to train a GPU/CPU Random Forest. */
   async train(req: TrainRequest): Promise<TrainResponse> {
     return this.request<TrainResponse>("POST", "/train", req);
+  }
+
+  /** Train on strokes from multiple images in one call. */
+  async trainMulti(req: TrainMultiRequest): Promise<TrainResponse> {
+    return this.request<TrainResponse>("POST", "/train-multi", req);
   }
 
   /**
@@ -272,6 +278,18 @@ export class SessionAllocatorClient {
       method: "DELETE",
       headers: this.headers(),
     });
+  }
+
+  /** Returns true if the allocator is reachable. */
+  async checkHealth(): Promise<boolean> {
+    try {
+      const res = await fetch(`${this.baseUrl}/health`, {
+        signal: AbortSignal.timeout(4000),
+      });
+      return res.ok;
+    } catch {
+      return false;
+    }
   }
 }
 

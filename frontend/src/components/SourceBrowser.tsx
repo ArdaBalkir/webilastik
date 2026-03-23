@@ -16,7 +16,8 @@ interface Props {
 }
 
 export function SourceBrowser({ onLoad }: Props) {
-  const open = useSignal(false);
+  // Auto-open the panel if t_source is pre-seeded
+  const open = useSignal(!!state.tSourceUrl.value);
   const dirUrl = useSignal(state.tSourceUrl.value);
   const loading = state.trainingSourcesLoading;
   const error = state.trainingSourcesError;

@@ -1,19 +1,20 @@
 import { h } from "preact";
 import * as state from "../state";
 import { Hand, Paintbrush } from "lucide-preact";
-import { saveAnnotationsForHeadless } from "../state";
 
 interface Props {
   onTrain: () => Promise<void>;
+  onExport: () => Promise<void>;
 }
 
-export function ControlBar({ onTrain }: Props) {
+export function ControlBar({ onTrain, onExport }: Props) {
   const tool = state.toolMode.value;
   const trainStatus = state.trainingStatus.value;
   const predVisible = state.predictionVisible.value;
   const opacity = state.predictionOpacity.value;
   const brushSz = state.brushSize.value;
   const strokes = state.strokes.value;
+  const canTrain = strokes.length > 0 && trainStatus !== "training";
 
   return (
     <section class="panel">
@@ -55,14 +56,9 @@ export function ControlBar({ onTrain }: Props) {
       )}
 
       <div class="row">
-        <span>
-          {strokes.length} stroke{strokes.length !== 1 ? "s" : ""}
-        </span>
+        <span>{strokes.length} stroke{strokes.length !== 1 ? "s" : ""}</span>
         {strokes.length > 0 && (
-          <button
-            class="btn-sm danger"
-            onClick={() => (state.strokes.value = [])}
-          >
+          <button class="btn-sm danger" onClick={() => (state.strokes.value = [])}>
             Clear
           </button>
         )}
@@ -71,7 +67,7 @@ export function ControlBar({ onTrain }: Props) {
       <button
         class={`btn btn-train ${trainStatus === "training" ? "loading" : ""}`}
         onClick={onTrain}
-        disabled={trainStatus === "training" || strokes.length === 0}
+        disabled={!canTrain}
       >
         {trainStatus === "training" ? "Training…" : "Train classifier"}
       </button>
@@ -79,15 +75,6 @@ export function ControlBar({ onTrain }: Props) {
       {trainStatus === "error" && (
         <p class="error">{state.trainingError.value}</p>
       )}
-
-      {/* Export annotations for HPC/headless use */}
-      <button
-        class="btn-sm"
-        title="Download annotations JSON for headless_cli / HPC batch use"
-        onClick={saveAnnotationsForHeadless}
-      >
-        ↓ Export annotations.json
-      </button>
 
       {trainStatus === "ready" && (
         <>
@@ -118,7 +105,19 @@ export function ControlBar({ onTrain }: Props) {
                     parseInt((e.target as HTMLInputElement).value) / 100)
                 }
               />
+              <span>{Math.round(opacity * 100)}%</span>
             </label>
+          )}
+
+          <button
+            class="btn btn-export"
+            onClick={onExport}
+            disabled={state.exportStatus.value === "submitting"}
+          >
+            {state.exportStatus.value === "submitting" ? "Submitting…" : "Export to HPC"}
+          </button>
+          {state.exportStatus.value && state.exportStatus.value !== "submitting" && (
+            <p class="status">{state.exportStatus.value}</p>
           )}
         </>
       )}
