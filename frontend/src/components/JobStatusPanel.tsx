@@ -48,11 +48,17 @@ export function JobStatusPanel() {
         try {
           const updated = await makeClient().getHeadlessJob(job.job_id);
           state.updateHpcJob(job.job_id, updated);
-          // Update active reference so UI re-renders
           state.activeHpcJob.value = { ...state.activeHpcJob.value!, ...updated };
           if (TERMINAL.has(updated.status)) break;
-        } catch {
-          // network blip — keep trying
+        } catch (e) {
+          // 404 means allocator restarted and lost job — mark unknown
+          if (String(e).includes("404")) {
+            const patch = { status: "error" as const, slurm_state: "UNKNOWN" };
+            state.updateHpcJob(job.job_id, patch);
+            state.activeHpcJob.value = { ...state.activeHpcJob.value!, ...patch };
+            break;
+          }
+          // other network blip — keep trying
         }
       }
     })();
