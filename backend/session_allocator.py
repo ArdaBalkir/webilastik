@@ -212,15 +212,6 @@ EXIT_CODE=$?
 echo "[wi2] Pipeline finished with exit code $EXIT_CODE at $(date)"
 exit $EXIT_CODE
 """
-        {level_flag} \\
-        {token_flag} \\
-        {prefetch_flag} \\
-        --workers $SLURM_CPUS_PER_TASK
-
-EXIT_CODE=$?
-echo "[wi2] Pipeline finished with exit code $EXIT_CODE at $(date)"
-exit $EXIT_CODE
-"""
 
 
 # ── SLURM status via sacct ────────────────────────────────────────────────────
