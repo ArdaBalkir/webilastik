@@ -70,17 +70,18 @@ function parseLogProgress(log: string): ImageProgress[] {
       continue;
     }
 
-    // Match "✓ done" — image completed
-    if (line.includes("✓ done") || line.includes("done")) {
+    // Match "✓ done" — image completed (must be the standalone done marker, not "[upload] done")
+    if (/✓\s*done/.test(line)) {
       const last = [...images.values()].pop();
       if (last && !last.done) {
         last.done = true;
         last.tilesDone = last.tilesTotal || last.tilesDone;
       }
+      continue;
     }
 
     // Match "✗ FAILED"
-    if (line.includes("✗ FAILED") || line.includes("FAILED")) {
+    if (/✗\s*FAILED/.test(line)) {
       const last = [...images.values()].pop();
       if (last) last.failed = true;
     }
@@ -258,7 +259,9 @@ export function ExportPanel() {
     logLoading.value = true;
     logText.value = "Loading…";
     try {
-      logText.value = await makeClient().getJobLog(jobId, 120);
+      const text = await makeClient().getJobLog(jobId, 200);
+      logText.value = text;
+      imageProgress.value = parseLogProgress(text);
     } catch (e) {
       logText.value = `Could not fetch log: ${e}`;
     }
@@ -352,62 +355,67 @@ export function ExportPanel() {
             <p class={`status${js?.status === "error" ? " error" : ""}`}>{msg.value}</p>
           )}
 
-          {/* Active job detail + live progress */}
+          {/* Active job detail */}
           {js && (
             <div class="hpc-job-info">
               <p class="hint">
                 SLURM {js.slurm_job_id} · <strong>{js.slurm_state}</strong>
               </p>
-
-              {/* Live image progress list */}
-              {imageProgress.value.length > 0 && (
-                <ul class="img-progress-list">
-                  {imageProgress.value.map((img) => {
-                    const pct = img.tilesTotal > 0
-                      ? Math.round((img.tilesDone / img.tilesTotal) * 100)
-                      : img.done ? 100 : 0;
-                    const statusIcon = img.done ? "✅" : img.failed ? "❌" : "🔄";
-                    const shortName = img.name.replace(/\.dzip$/, "");
-                    return (
-                      <li key={img.idx} class="img-progress-item">
-                        <div class="img-progress-header">
-                          <span class="img-progress-name" title={img.name}>
-                            {statusIcon} {img.idx}/{img.total} {shortName}
-                          </span>
-                          <span class="img-progress-pct">{pct}%</span>
-                        </div>
-                        <div class="progress-bar-bg">
-                          <div
-                            class="progress-bar-fill"
-                            style={{ width: `${pct}%` }}
-                          />
-                        </div>
-                        {!img.done && img.tilesTotal > 0 && (
-                          <span class="hint">
-                            {img.tilesDone}/{img.tilesTotal} tiles · {img.rate}
-                          </span>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ul>
-              )}
-
               <div class="row" style={{ gap: 6 }}>
+                <button
+                  class="btn-sm"
+                  onClick={() => fetchLog(js.job_id)}
+                  disabled={logLoading.value}
+                >
+                  Refresh log
+                </button>
                 <button
                   class="btn-sm"
                   onClick={() => (showRawLog.value = !showRawLog.value)}
                 >
-                  {showRawLog.value ? "Hide log" : "Show log"}
-                </button>
-                <button class="btn-sm" onClick={() => fetchLog(js.job_id)} disabled={logLoading.value}>
-                  Refresh log
+                  {showRawLog.value ? "Hide raw log" : "Raw log"}
                 </button>
               </div>
-              {showRawLog.value && logText.value && (
-                <pre class="job-log">{logText.value}</pre>
-              )}
             </div>
+          )}
+
+          {/* Image progress list — shows for active job or after viewing any job log */}
+          {imageProgress.value.length > 0 && (
+            <ul class="img-progress-list">
+              {imageProgress.value.map((img) => {
+                const pct = img.tilesTotal > 0
+                  ? Math.round((img.tilesDone / img.tilesTotal) * 100)
+                  : img.done ? 100 : 0;
+                const statusIcon = img.done ? "✅" : img.failed ? "❌" : "🔄";
+                const shortName = img.name.replace(/\.dzip$/, "");
+                return (
+                  <li key={img.idx} class="img-progress-item">
+                    <div class="img-progress-header">
+                      <span class="img-progress-name" title={img.name}>
+                        {statusIcon} {img.idx}/{img.total} {shortName}
+                      </span>
+                      <span class="img-progress-pct">{pct}%</span>
+                    </div>
+                    <div class="progress-bar-bg">
+                      <div
+                        class="progress-bar-fill"
+                        style={{ width: `${pct}%` }}
+                      />
+                    </div>
+                    {!img.done && img.tilesTotal > 0 && (
+                      <span class="hint">
+                        {img.tilesDone}/{img.tilesTotal} tiles · {img.rate}
+                      </span>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          {/* Raw log viewer */}
+          {showRawLog.value && logText.value && (
+            <pre class="job-log">{logText.value}</pre>
           )}
 
           {/* Job history */}
@@ -439,8 +447,34 @@ export function ExportPanel() {
                   >
                     {logJobId.value === r.job_id ? "Refresh" : "Log"}
                   </button>
-                  {logJobId.value === r.job_id && logText.value && (
-                    <pre class="job-log">{logText.value}</pre>
+                  {logJobId.value === r.job_id && (
+                    <>
+                      {imageProgress.value.length > 0 && (
+                        <ul class="img-progress-list">
+                          {imageProgress.value.map((img) => {
+                            const pct = img.tilesTotal > 0
+                              ? Math.round((img.tilesDone / img.tilesTotal) * 100)
+                              : img.done ? 100 : 0;
+                            const statusIcon = img.done ? "✅" : img.failed ? "❌" : "🔄";
+                            const shortName = img.name.replace(/\.dzip$/, "");
+                            return (
+                              <li key={img.idx} class="img-progress-item">
+                                <div class="img-progress-header">
+                                  <span class="img-progress-name" title={img.name}>
+                                    {statusIcon} {img.idx}/{img.total} {shortName}
+                                  </span>
+                                  <span class="img-progress-pct">{pct}%</span>
+                                </div>
+                                <div class="progress-bar-bg">
+                                  <div class="progress-bar-fill" style={{ width: `${pct}%` }} />
+                                </div>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                      {logText.value && <pre class="job-log">{logText.value}</pre>}
+                    </>
                   )}
                 </li>
               ))}
