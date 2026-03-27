@@ -91,14 +91,6 @@ function parseLogProgress(log: string): ImageProgress[] {
   return result;
 }
 
-const STATUS_ICON: Record<string, string> = {
-  pending: "⏳",
-  running: "🔄",
-  done: "✅",
-  error: "❌",
-  cancelled: "🚫",
-};
-
 export function ExportPanel() {
   const open = useSignal(false);
   const pSource = useSignal(state.pSourceUrl.value);
