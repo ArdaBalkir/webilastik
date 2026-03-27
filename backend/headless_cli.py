@@ -212,9 +212,15 @@ def train(
             dzip_url, session=_make_session(workers, token), bearer_token=token
         )
         _, meta = src.find_dzi()
-        level = level_hint if level_hint is not None else meta.max_level
+        # Per-annotation level takes priority, then the global level_hint, then max
+        ann_level = ann.get("level")
+        level = (
+            ann_level
+            if ann_level is not None
+            else (level_hint if level_hint is not None else meta.max_level)
+        )
 
-        scale = 2 ** (level - meta.max_level)
+        scale = 2.0 ** (level - meta.max_level)
         lw = max(1, round(meta.width * scale))
         lh = max(1, round(meta.height * scale))
         ts, ol = meta.tile_size, meta.overlap
@@ -379,9 +385,11 @@ def build_prediction_dzip(
     token: Optional[str],
     workers: int,
     local_path: Optional[pathlib.Path] = None,
+    level: Optional[int] = None,
 ) -> tuple[pathlib.Path, pathlib.Path]:
     """
-    Predict all tiles at full resolution, write to tmpdir, pack as DZIP.
+    Predict all tiles at the requested level (default: max_level = full res),
+    write to tmpdir, pack as DZIP.
     If local_path is provided, reads tiles from it (no network) — use after prefetch.
     Returns (tmpdir, dzip_path).  Caller must shutil.rmtree(tmpdir).
     """
@@ -397,8 +405,11 @@ def build_prediction_dzip(
             dzip_url, session=_make_session(workers, token), bearer_token=token
         )
     _, meta = src.find_dzi()
-    level = meta.max_level
-    lw, lh, ts, ol = meta.width, meta.height, meta.tile_size, meta.overlap
+    level = level if level is not None else meta.max_level
+    scale = 2.0 ** (level - meta.max_level)
+    lw = max(1, round(meta.width * scale))
+    lh = max(1, round(meta.height * scale))
+    ts, ol = meta.tile_size, meta.overlap
     num_cols = math.ceil(lw / ts)
     num_rows = math.ceil(lh / ts)
     total = num_cols * num_rows
@@ -560,6 +571,17 @@ def run(
     logger.info("=" * 60)
     clf = train(annotations, features, level_hint, token, workers)
 
+    # Determine export level: prefer per-annotation level, fall back to level_hint
+    export_level: Optional[int] = level_hint
+    for ann in annotations:
+        if ann.get("level") is not None:
+            export_level = ann["level"]
+            break
+    if export_level is not None:
+        logger.info("Export level: %d", export_level)
+    else:
+        logger.info("Export level: max_level of each image (full res)")
+
     # ── 2. List sources ───────────────────────────────────────────────────────
     logger.info("=" * 60)
     logger.info("PHASE 2 — LISTING SOURCES: %s", p_source)
@@ -614,6 +636,7 @@ def run(
                 token,
                 workers,
                 local_path=local_path,
+                level=export_level,
             )
             logger.info("  uploading → %s", dest_url)
             upload_dzip(dzip_path, dest_url, token)
@@ -807,7 +830,13 @@ def _cmd_predict(args: argparse.Namespace) -> int:
         tmpdir = None
         try:
             tmpdir, dzip_path = build_prediction_dzip(
-                src_url, dzi_name, clf, features, token, args.workers
+                src_url,
+                dzi_name,
+                clf,
+                features,
+                token,
+                args.workers,
+                level=getattr(args, "level", None),
             )
             upload_dzip(dzip_path, dest_url, token)
             logger.info("  ✓ done")
@@ -932,6 +961,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     _add_features_args(p_pred)
     _add_token_args(p_pred)
     p_pred.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
+    p_pred.add_argument(
+        "--level",
+        type=int,
+        default=None,
+        help="DZI level to export at (default: max = full res)",
+    )
 
     # ── run ───────────────────────────────────────────────────────────────────
     p_run = sub.add_parser("run", help="Full pipeline: train + predict + upload")

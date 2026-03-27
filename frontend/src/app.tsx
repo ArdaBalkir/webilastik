@@ -5,7 +5,6 @@ import { DziViewer } from "./dzi_viewer";
 import { BrushingCanvas, PredictionOverlay } from "./brushing_canvas";
 import { ApiClient, SessionAllocatorClient, featureConfigToFilters } from "./api";
 import * as state from "./state";
-import { LabelPanel } from "./components/LabelPanel";
 import { FeaturePanel } from "./components/FeaturePanel";
 import { ControlBar } from "./components/ControlBar";
 import { DataPanel } from "./components/DataPanel";
@@ -114,6 +113,13 @@ export function App() {
   useEffect(() => {
     return state.strokes.subscribe((s: typeof state.strokes.value) => {
       brushRef.current?.setStrokes(s);
+    });
+  }, []);
+
+  // Sync annotation panel hover highlight to brush canvas
+  useEffect(() => {
+    return state.highlightedStrokeIdx.subscribe((idx: number | null) => {
+      brushRef.current?.setHighlightedStroke(idx);
     });
   }, []);
 
@@ -245,7 +251,15 @@ export function App() {
       const res = await client.submitHeadlessJob({
         annotations: [{
           dzip_url: state.dziUrl.value,
-          strokes: strokes.map((s) => ({ label: s.labelId, points: s.points })),
+          level: state.workLevel.value ?? state.dziMeta.value?.maxLevel,
+          strokes: strokes.map((s) => {
+            const wl = state.workLevel.value ?? state.dziMeta.value?.maxLevel ?? s.level;
+            const f = Math.pow(2, wl - s.level);
+            return {
+              label: s.labelId,
+              points: s.points.map(([x, y]) => [Math.round(x * f), Math.round(y * f)] as [number, number]),
+            };
+          }),
         }],
         features: { filters: featureConfigToFilters(fc), scales: fc.scales },
         p_source: srcDir,
@@ -269,9 +283,8 @@ export function App() {
     <div class="app-root">
       <aside class="sidebar">
         <DataPanel onLoad={handleLoadImage} />
-        <ControlBar onTrain={handleTrain} onExport={handleExport} />
-        <LabelPanel />
         <FeaturePanel />
+        <ControlBar onTrain={handleTrain} onExport={handleExport} />
         <JobStatusPanel />
       </aside>
       <div class="viewer-area" ref={viewerContainerRef} />

@@ -2,7 +2,7 @@ import { h } from "preact";
 import * as state from "../state";
 import { nextLabelId } from "../state";
 import type { Label } from "../types";
-import { X, Plus } from "lucide-preact";
+import { Plus } from "lucide-preact";
 
 const PALETTE = [
   "#e05252",
@@ -43,8 +43,8 @@ export function LabelPanel() {
   }
 
   return (
-    <section class="panel">
-      <h2>Labels</h2>
+    <div class="subsection">
+      <h3 class="subsection-title">Labels</h3>
       <ul class="label-list">
         {labels.map((label) => (
           <li
@@ -74,18 +74,6 @@ export function LabelPanel() {
               }
               onClick={(e) => e.stopPropagation()}
             />
-            {labels.length > 1 && (
-              <button
-                class="btn-icon"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  removeLabel(label.id);
-                }}
-                title="Remove label"
-              >
-                <X size={13} />
-              </button>
-            )}
           </li>
         ))}
       </ul>
@@ -93,6 +81,6 @@ export function LabelPanel() {
         <Plus size={11} style="vertical-align:middle;margin-right:2px" />
         Add label
       </button>
-    </section>
+    </div>
   );
 }

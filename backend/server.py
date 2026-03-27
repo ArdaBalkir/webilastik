@@ -178,10 +178,12 @@ def _build_prediction_dzip(
     features: "FeatureSpec",
     authorization: Optional[str],
     job_id: Optional[str] = None,
+    level: Optional[int] = None,
 ) -> tuple[pathlib.Path, pathlib.Path]:
     """
-    Predict every tile at full resolution (meta.max_level), write PNGs to a
-    temp directory, pack them into a DZIP, and return (tmpdir, dzip_path).
+    Predict every tile at the requested level (default: max_level = full res),
+    write PNGs to a temp directory, pack them into a DZIP, and return
+    (tmpdir, dzip_path).
 
     Caller is responsible for shutil.rmtree(tmpdir) after use.
     If job_id is given, updates _exports[job_id]["progress"] as tiles complete.
@@ -192,20 +194,24 @@ def _build_prediction_dzip(
     dzip_src = _get_dzip(dzip_url, authorization)
     _, meta = dzip_src.find_dzi()
 
-    # Always export at full resolution
-    level = meta.max_level
-    lw, lh, ts, ol = meta.width, meta.height, meta.tile_size, meta.overlap
+    # Use the requested level; fall back to max (full res)
+    level = level if level is not None else meta.max_level
+    scale = 2.0 ** (level - meta.max_level)
+    lw = max(1, round(meta.width * scale))
+    lh = max(1, round(meta.height * scale))
+    ts, ol = meta.tile_size, meta.overlap
     num_cols = math.ceil(lw / ts)
     num_rows = math.ceil(lh / ts)
     total = num_cols * num_rows
     out_name = f"{dzi_name}_predictions"
 
     logger.info(
-        "[build-dzip] %s — %d×%d tiles at level %d (full res)",
+        "[build-dzip] %s — %d×%d tiles at level %d (scale %.4f)",
         out_name,
         num_cols,
         num_rows,
         level,
+        scale,
     )
 
     tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="webilastik_"))
@@ -315,9 +321,10 @@ class TrainResponse(BaseModel):
 
 # Multi-image training — matches the annotations JSON format exactly
 class AnnotationImage(BaseModel):
-    """One annotated image. Matches {dzip_url, strokes} annotations JSON entry."""
+    """One annotated image. Matches {dzip_url, level, strokes} annotations JSON entry."""
 
     dzip_url: str
+    level: Optional[int] = None  # DZI level strokes were drawn at; None = max_level
     strokes: List[StrokeData]
 
 
@@ -350,6 +357,9 @@ class BatchExportRequest(BaseModel):
     p_source: str  # data-proxy dir URL containing source DZIPs
     output_dir: str  # data-proxy dir URL where predictions will be written
     features: FeatureSpec
+    level: Optional[int] = (
+        None  # DZI level to export at; None = max_level of each image
+    )
 
 
 class HeadlessRequest(BaseModel):
@@ -492,9 +502,9 @@ async def train_multi(
 
         for ann in req.annotations:
             dzip = _get_dzip(ann.dzip_url, authorization)
-            dzi_name, meta = dzip.find_dzi()  # resolve name + level from the DZIP
-            level = meta.max_level
-            scale = 2 ** (level - meta.max_level)  # always 1.0 at max_level
+            dzi_name, meta = dzip.find_dzi()  # resolve name from the DZIP
+            level = ann.level if ann.level is not None else meta.max_level
+            scale = 2.0 ** (level - meta.max_level)
             lw = max(1, round(meta.width * scale))
             lh = max(1, round(meta.height * scale))
             ts = meta.tile_size
@@ -846,6 +856,7 @@ async def headless_run(
         p_source=req.p_source,
         output_dir=req.output_dir,
         features=req.features,
+        level=req.level,
     )
     job_id = str(uuid.uuid4())
     _batch_jobs[job_id] = {
@@ -883,7 +894,12 @@ async def export_zip(
 
     def _do() -> tuple[bytes, str]:
         tmpdir, dzip_path = _build_prediction_dzip(
-            req.dzip_url, req.dzi_name, clf, req.features, authorization
+            req.dzip_url,
+            req.dzi_name,
+            clf,
+            req.features,
+            authorization,
+            level=req.level,
         )
         try:
             return dzip_path.read_bytes(), dzip_path.name
@@ -975,6 +991,7 @@ async def _run_export(
                 req.features,
                 authorization,
                 job_id=job_id,
+                level=req.level,
             )
             try:
                 zip_bytes = dzip_path.read_bytes()
@@ -1115,6 +1132,7 @@ async def _run_batch(
                         req.features,
                         authorization,
                         job_id=None,  # don't clobber batch progress
+                        level=req.level,
                     )
                     try:
                         return dzip_path.read_bytes(), dzip_path.name

@@ -270,3 +270,26 @@ export function nextLabelId(): number {
   );
   return max + 1;
 }
+
+// ── Annotation management ────────────────────────────────────────────────────
+
+/** Index of the stroke currently hovered in the Annotations panel (for canvas highlight). */
+export const highlightedStrokeIdx = signal<number | null>(null);
+
+/** Delete the stroke at the given index in the current image's stroke list. */
+export function deleteStrokeAt(idx: number): void {
+  strokes.value = strokes.value.filter((_, i) => i !== idx);
+  highlightedStrokeIdx.value = null;
+}
+
+/** Remove all strokes for a given label from the current image. */
+export function clearStrokesByLabel(labelId: number): void {
+  strokes.value = strokes.value.filter((s) => s.labelId !== labelId);
+  highlightedStrokeIdx.value = null;
+}
+
+/** Clear every stroke on the current image. */
+export function clearAllStrokes(): void {
+  strokes.value = [];
+  highlightedStrokeIdx.value = null;
+}

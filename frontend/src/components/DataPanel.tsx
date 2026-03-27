@@ -15,6 +15,7 @@ export function DataPanel({ onLoad }: Props) {
   const error = state.loadError;
   const meta = state.dziMeta;
   const resolution = state.workLevelOffset;
+  const showAdvanced = useSignal(false);
 
   // Inline source browser
   const showBrowse = useSignal(false);
@@ -70,35 +71,15 @@ export function DataPanel({ onLoad }: Props) {
     <section class="panel">
       <h2>Image</h2>
 
-      <div class="row">
-        <input
-          class="input-url"
-          type="text"
-          placeholder="DZIP URL…"
-          value={customUrl.value}
-          onInput={(e: Event) =>
-            (customUrl.value = (e.target as HTMLInputElement).value)
-          }
-          onKeyDown={(e: KeyboardEvent) =>
-            e.key === "Enter" && loadUrl(customUrl.value)
-          }
-        />
-        <button
-          class="btn"
-          onClick={() => loadUrl(customUrl.value)}
-          disabled={loading.value}
-        >
-          Open
-        </button>
-      </div>
-
-      <div class="row">
-        <label class="btn-file">
-          Local file…{" "}
-          <input type="file" accept=".dzip,.zip" onChange={handleFileInput} />
-        </label>
-        <button class="btn-sm" onClick={openBrowse}>Browse…</button>
-      </div>
+      {/* Primary action: Browse data-proxy */}
+      <button
+        class="btn btn-train"
+        style={{ marginBottom: 4 }}
+        onClick={openBrowse}
+        disabled={browseLoading.value}
+      >
+        {browseLoading.value ? "Loading…" : "Browse data-proxy"}
+      </button>
 
       {/* Inline source picker */}
       {showBrowse.value && (
@@ -170,26 +151,61 @@ export function DataPanel({ onLoad }: Props) {
         </label>
       </div>
 
-      <div class="row">
-        <label>Server:</label>
-        <input
-          class="input-url"
-          type="text"
-          value={state.serverUrl.value}
-          onInput={(e) => (state.serverUrl.value = (e.target as HTMLInputElement).value)}
-        />
-      </div>
+      {/* Advanced: server, token, direct URL, local file */}
+      <details class="adv-details">
+        <summary class="adv-summary">Advanced</summary>
+        <div class="adv-body">
+          <div class="row">
+            <input
+              class="input-url"
+              type="text"
+              placeholder="DZIP URL…"
+              value={customUrl.value}
+              onInput={(e: Event) =>
+                (customUrl.value = (e.target as HTMLInputElement).value)
+              }
+              onKeyDown={(e: KeyboardEvent) =>
+                e.key === "Enter" && loadUrl(customUrl.value)
+              }
+            />
+            <button
+              class="btn"
+              onClick={() => loadUrl(customUrl.value)}
+              disabled={loading.value}
+            >
+              Open
+            </button>
+          </div>
 
-      <div class="row">
-        <label>Token:</label>
-        <input
-          class="input-url"
-          type="password"
-          placeholder="Bearer token"
-          value={state.bearerToken.value}
-          onInput={(e) => (state.bearerToken.value = (e.target as HTMLInputElement).value)}
-        />
-      </div>
+          <div class="row">
+            <label class="btn-sm btn-file">
+              Local file…{" "}
+              <input type="file" accept=".dzip,.zip" onChange={handleFileInput} />
+            </label>
+          </div>
+
+          <div class="row">
+            <label class="hint">Server:</label>
+            <input
+              class="input-url"
+              type="text"
+              value={state.serverUrl.value}
+              onInput={(e) => (state.serverUrl.value = (e.target as HTMLInputElement).value)}
+            />
+          </div>
+
+          <div class="row">
+            <label class="hint">Token:</label>
+            <input
+              class="input-url"
+              type="password"
+              placeholder="Bearer token"
+              value={state.bearerToken.value}
+              onInput={(e) => (state.bearerToken.value = (e.target as HTMLInputElement).value)}
+            />
+          </div>
+        </div>
+      </details>
     </section>
   );
 }

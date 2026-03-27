@@ -4,6 +4,7 @@
  * Features:
  *  - Health indicator (pings allocator on open)
  *  - Job submission with auto-polling
+ *  - Live per-image progress parsed from SLURM log
  *  - Job history persisted to localStorage (last 20 jobs)
  *  - Log viewer per job
  */
@@ -14,6 +15,81 @@ import { SessionAllocatorClient, featureConfigToFilters } from "../api";
 import type { HpcJobStatus } from "../api";
 import type { HpcJobRecord } from "../types";
 import * as state from "../state";
+
+const STATUS_ICON: Record<string, string> = {
+  pending: "⏳",
+  running: "🔄",
+  done: "✅",
+  error: "❌",
+  cancelled: "🚫",
+};
+
+// ── Log parser ──────────────────────────────────────────────────────────────
+
+interface ImageProgress {
+  idx: number;      // 1-based image index
+  total: number;    // total images
+  name: string;     // e.g. "79556738_s306.jpg.dzip"
+  tilesDone: number;
+  tilesTotal: number;
+  rate: string;     // e.g. "82.6/s"
+  done: boolean;    // ✓ done seen
+  failed: boolean;  // ✗ FAILED seen
+}
+
+function parseLogProgress(log: string): ImageProgress[] {
+  const images: Map<number, ImageProgress> = new Map();
+
+  for (const line of log.split("\n")) {
+    // Match "[N/M] name.dzip" — image header
+    const hdr = line.match(/\[(\d+)\/(\d+)\]\s+(\S+)/);
+    if (hdr) {
+      const idx = parseInt(hdr[1]);
+      const total = parseInt(hdr[2]);
+      const name = hdr[3];
+      if (!images.has(idx)) {
+        images.set(idx, { idx, total, name, tilesDone: 0, tilesTotal: 0, rate: "", done: false, failed: false });
+      } else {
+        const img = images.get(idx)!;
+        img.name = name;
+        img.total = total;
+      }
+      continue;
+    }
+
+    // Match "tiles X/Y  rate/s" — tile progress
+    const tiles = line.match(/tiles\s+(\d+)\/(\d+)\s+([\d.]+\/s)/);
+    if (tiles) {
+      // Apply to the last (highest-index) image
+      const last = [...images.values()].pop();
+      if (last) {
+        last.tilesDone = parseInt(tiles[1]);
+        last.tilesTotal = parseInt(tiles[2]);
+        last.rate = tiles[3];
+      }
+      continue;
+    }
+
+    // Match "✓ done" — image completed
+    if (line.includes("✓ done") || line.includes("done")) {
+      const last = [...images.values()].pop();
+      if (last && !last.done) {
+        last.done = true;
+        last.tilesDone = last.tilesTotal || last.tilesDone;
+      }
+    }
+
+    // Match "✗ FAILED"
+    if (line.includes("✗ FAILED") || line.includes("FAILED")) {
+      const last = [...images.values()].pop();
+      if (last) last.failed = true;
+    }
+  }
+
+  // Build ordered array, filling in images we haven't seen yet
+  const result = [...images.values()].sort((a, b) => a.idx - b.idx);
+  return result;
+}
 
 const STATUS_ICON: Record<string, string> = {
   pending: "⏳",
@@ -39,6 +115,10 @@ export function ExportPanel() {
   const logLoading = useSignal(false);
   const showHistory = useSignal(false);
 
+  // Live progress parsed from log
+  const imageProgress = useSignal<ImageProgress[]>([]);
+  const showRawLog = useSignal(false);
+
   function makeClient() {
     return new SessionAllocatorClient(
       allocatorUrlInput.value.trim(),
@@ -55,11 +135,15 @@ export function ExportPanel() {
 
   function startPolling(jobId: string) {
     stopPolling();
+    // Immediately fetch log once
+    fetchLogSilent(jobId);
     polling.value = setInterval(async () => {
       try {
         const s = await makeClient().getHeadlessJob(jobId);
         activeJob.value = s;
         state.updateHpcJob(jobId, { status: s.status, slurm_state: s.slurm_state });
+        // Always fetch log while active
+        await fetchLogSilent(jobId);
         if (s.status === "done") {
           stopPolling();
           msg.value = `✅ Done — SLURM ${s.slurm_job_id} completed.`;
@@ -71,6 +155,18 @@ export function ExportPanel() {
         msg.value = `Poll error: ${e}`;
       }
     }, 5000);
+  }
+
+  /** Fetch log without UI loading state — used by auto-poll. */
+  async function fetchLogSilent(jobId: string) {
+    try {
+      const text = await makeClient().getJobLog(jobId, 200);
+      logText.value = text;
+      logJobId.value = jobId;
+      imageProgress.value = parseLogProgress(text);
+    } catch {
+      // ignore transient failures during polling
+    }
   }
 
   async function checkHealth() {
@@ -97,11 +193,19 @@ export function ExportPanel() {
     if (state.dziUrl.value && state.strokes.value.length > 0) {
       bySource[state.dziUrl.value] = state.strokes.value;
     }
+    const workLevel = state.workLevel.value ?? state.dziMeta.value?.maxLevel;
     const annotations = Object.entries(bySource)
       .filter(([, ss]) => ss.length > 0)
       .map(([dzip_url, ss]) => ({
         dzip_url,
-        strokes: ss.map((s) => ({ label: s.labelId, points: s.points })),
+        level: workLevel,
+        strokes: ss.map((s) => {
+          const f = workLevel != null ? Math.pow(2, workLevel - s.level) : 1;
+          return {
+            label: s.labelId,
+            points: s.points.map(([x, y]) => [Math.round(x * f), Math.round(y * f)] as [number, number]),
+          };
+        }),
       }));
 
     if (annotations.length === 0) {
@@ -256,23 +360,59 @@ export function ExportPanel() {
             <p class={`status${js?.status === "error" ? " error" : ""}`}>{msg.value}</p>
           )}
 
-          {/* Active job detail */}
+          {/* Active job detail + live progress */}
           {js && (
             <div class="hpc-job-info">
               <p class="hint">
                 SLURM {js.slurm_job_id} · <strong>{js.slurm_state}</strong>
               </p>
+
+              {/* Live image progress list */}
+              {imageProgress.value.length > 0 && (
+                <ul class="img-progress-list">
+                  {imageProgress.value.map((img) => {
+                    const pct = img.tilesTotal > 0
+                      ? Math.round((img.tilesDone / img.tilesTotal) * 100)
+                      : img.done ? 100 : 0;
+                    const statusIcon = img.done ? "✅" : img.failed ? "❌" : "🔄";
+                    const shortName = img.name.replace(/\.dzip$/, "");
+                    return (
+                      <li key={img.idx} class="img-progress-item">
+                        <div class="img-progress-header">
+                          <span class="img-progress-name" title={img.name}>
+                            {statusIcon} {img.idx}/{img.total} {shortName}
+                          </span>
+                          <span class="img-progress-pct">{pct}%</span>
+                        </div>
+                        <div class="progress-bar-bg">
+                          <div
+                            class="progress-bar-fill"
+                            style={{ width: `${pct}%` }}
+                          />
+                        </div>
+                        {!img.done && img.tilesTotal > 0 && (
+                          <span class="hint">
+                            {img.tilesDone}/{img.tilesTotal} tiles · {img.rate}
+                          </span>
+                        )}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+
               <div class="row" style={{ gap: 6 }}>
-                <button class="btn-sm" onClick={() => fetchLog(js.job_id)} disabled={logLoading.value}>
-                  {logJobId.value === js.job_id ? "Refresh log" : "Show log"}
+                <button
+                  class="btn-sm"
+                  onClick={() => (showRawLog.value = !showRawLog.value)}
+                >
+                  {showRawLog.value ? "Hide log" : "Show log"}
                 </button>
-                {logJobId.value === js.job_id && (
-                  <button class="btn-sm" onClick={() => { logJobId.value = null; logText.value = ""; }}>
-                    Hide
-                  </button>
-                )}
+                <button class="btn-sm" onClick={() => fetchLog(js.job_id)} disabled={logLoading.value}>
+                  Refresh log
+                </button>
               </div>
-              {logJobId.value === js.job_id && logText.value && (
+              {showRawLog.value && logText.value && (
                 <pre class="job-log">{logText.value}</pre>
               )}
             </div>

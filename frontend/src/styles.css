@@ -64,6 +64,41 @@ body {
   margin-bottom: 2px;
 }
 
+/* ── Subsections (embedded inside a panel) ───────────────────────────────── */
+.subsection {
+  border-top: 1px solid #333;
+  padding-top: 6px;
+  margin-top: 2px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.subsection-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: #777;
+  margin: 0;
+}
+
+.subsection-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  background: none;
+  border: none;
+  color: #aaa;
+  padding: 2px 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  cursor: pointer;
+}
+.subsection-toggle:hover { color: #ddd; }
+
 /* ── Buttons ─────────────────────────────────────────────────────────────── */
 .btn {
   padding: 5px 10px;
@@ -788,3 +823,132 @@ select {
 .job-hist-row:hover { background: #252525; }
 .job-time { font-size: 10px; color: #666; margin-left: auto; }
 .job-badge-sm { font-size: 10px; }
+
+/* ── Annotation panel ────────────────────────────────────────────────────── */
+.ann-header-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.ann-group {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 4px 0;
+  border-top: 1px solid #2a2a2a;
+}
+.ann-group:first-child { border-top: none; }
+
+.ann-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.ann-group-title {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #ccc;
+}
+
+.ann-label-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.ann-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-left: 14px;
+  max-height: 100px;
+  overflow-y: auto;
+}
+
+.ann-stroke-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 4px;
+  border-radius: 3px;
+  cursor: default;
+}
+.ann-stroke-item:hover { background: #2a3a38; }
+
+.ann-body {
+  max-height: 280px;
+  overflow-y: auto;
+}
+
+/* ── Advanced details toggle ─────────────────────────────────────────────── */
+.adv-details { margin-top: 2px; }
+
+.adv-summary {
+  font-size: 10px;
+  color: #666;
+  cursor: pointer;
+  padding: 3px 0;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.adv-summary:hover { color: #999; }
+
+.adv-body {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 6px 0 2px;
+}
+
+/* ── Image progress list (HPC export) ────────────────────────────────────── */
+.img-progress-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.img-progress-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 6px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+}
+
+.img-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.img-progress-name {
+  font-size: 10px;
+  color: #ccc;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+}
+
+.img-progress-pct {
+  font-size: 10px;
+  color: #3dd6c0;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
