@@ -189,6 +189,11 @@ export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export NUMEXPR_MAX_THREADS=$SLURM_CPUS_PER_TASK
 {token_export}
 
+# Write annotations to scratch (avoids E2BIG on srun arg list)
+_ANN=/p/scratch/ebrains-0000003/wi2_ann_{job_id}.json
+echo '{annotations_b64}' | base64 -d > "$_ANN"
+trap 'rm -f "$_ANN"' EXIT
+
 echo "[wi2] =================================================="
 echo "[wi2] Job {job_id} starting on $(hostname) at $(date)"
 echo "[wi2] SLURM CPUs: $SLURM_CPUS_PER_TASK"
@@ -198,7 +203,7 @@ echo "[wi2] =================================================="
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
     python -m backend.headless_cli run \\
-        --annotations-b64 '{annotations_b64}' \\
+        --annotations "$_ANN" \\
         {t_source_flag} \\
         --p-source '{p_source}' \\
         --output-dir '{output_dir}' \\
