@@ -37,6 +37,19 @@ interface ImageProgress {
   failed: boolean;  // ✗ FAILED seen
 }
 
+/** Strip logger prefixes so the raw log looks clean in the UI. */
+function cleanLog(raw: string): string {
+  return raw
+    .split("\n")
+    .map((line) =>
+      line
+        .replace(/^\s*\d{2}:\d{2}:\d{2}\s+(INFO|WARNING|ERROR|DEBUG)\s+/, "")  // "12:34:56  INFO    "
+        .replace(/^\s*(INFO|WARNING|ERROR|DEBUG):(\S+:)*\s*/, "")                // "INFO:wi2.headless:  "
+        .replace(/^\[wi2\]\s*/, "")                                              // "[wi2] ..."
+    )
+    .join("\n");
+}
+
 function parseLogProgress(log: string): ImageProgress[] {
   const images: Map<number, ImageProgress> = new Map();
 
@@ -415,7 +428,7 @@ export function ExportPanel() {
 
           {/* Raw log viewer */}
           {showRawLog.value && logText.value && (
-            <pre class="job-log">{logText.value}</pre>
+            <pre class="job-log">{cleanLog(logText.value)}</pre>
           )}
 
           {/* Job history */}
@@ -473,7 +486,7 @@ export function ExportPanel() {
                           })}
                         </ul>
                       )}
-                      {logText.value && <pre class="job-log">{logText.value}</pre>}
+                      {logText.value && <pre class="job-log">{cleanLog(logText.value)}</pre>}
                     </>
                   )}
                 </li>
