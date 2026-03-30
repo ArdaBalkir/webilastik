@@ -1,6 +1,8 @@
 import { h } from "preact";
 import * as state from "../state";
 import { Hand, Paintbrush } from "lucide-preact";
+import { LabelPanel } from "./LabelPanel";
+import { AnnotationPanel } from "./AnnotationPanel";
 
 interface Props {
   onTrain: () => Promise<void>;
@@ -55,14 +57,8 @@ export function ControlBar({ onTrain, onExport }: Props) {
         </label>
       )}
 
-      <div class="row">
-        <span>{strokes.length} stroke{strokes.length !== 1 ? "s" : ""}</span>
-        {strokes.length > 0 && (
-          <button class="btn-sm danger" onClick={() => (state.strokes.value = [])}>
-            Clear
-          </button>
-        )}
-      </div>
+      <LabelPanel />
+      <AnnotationPanel />
 
       <button
         class={`btn btn-train ${trainStatus === "training" ? "loading" : ""}`}

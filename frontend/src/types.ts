@@ -44,10 +44,10 @@ export const DEFAULT_FEATURE_CONFIG: FeatureConfig = {
   gaussianSmoothing: true,
   laplacianOfGaussian: true,
   gaussianGradientMagnitude: true,
-  differenceOfGaussians: false,
-  structureTensorEigenvalues: false,
+  differenceOfGaussians: true,
+  structureTensorEigenvalues: true,
   hessianOfGaussianEigenvalues: true,
-  scales: [0.3, 0.7, 1.0, 1.6, 3.5, 5.0],
+  scales: [0.3, 0.7, 1.0, 1.6, 3.5, 5.0, 10.0],
 };
 
 // ── API request / response shapes ────────────────────────────────────────────
@@ -79,6 +79,7 @@ export interface TrainMultiRequest {
   /** Same structure as the exported annotations JSON — works for 1 or N images. */
   annotations: Array<{
     dzip_url: string;
+    level?: number; // DZI level strokes were drawn at; omit = max_level (full res)
     strokes: Array<{
       label: number;
       points: Array<[number, number]>;

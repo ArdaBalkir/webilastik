@@ -25,6 +25,7 @@ export class BrushingCanvas {
   private activeLabelId = 1;
   private brushSize = 3; // radius in full-res image pixels
   private enabled = false;
+  private highlightedIdx: number | null = null;
 
   // Callbacks
   onStrokeFinished?: (stroke: Stroke) => void;
@@ -71,6 +72,12 @@ export class BrushingCanvas {
     this.redraw();
   }
 
+  /** Highlight a specific stroke index (from the annotation panel hover). */
+  setHighlightedStroke(idx: number | null) {
+    this.highlightedIdx = idx;
+    this.redraw();
+  }
+
   /** Replace all stored strokes (e.g. after project load). */
   setStrokes(strokes: Stroke[]) {
     this.strokes = strokes;
@@ -104,11 +111,20 @@ export class BrushingCanvas {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
 
-    // Draw committed strokes
-    for (const stroke of this.strokes) {
+    // Draw committed strokes (highlighted one goes on top)
+    for (let i = 0; i < this.strokes.length; i++) {
+      if (i === this.highlightedIdx) continue; // draw highlighted last
+      const stroke = this.strokes[i];
       const label = this.labels.find((l) => l.id === stroke.labelId);
       const color = label?.color ?? "#ff0000";
-      this.drawStroke(stroke.points, color, stroke.level);
+      this.drawStroke(stroke.points, color, stroke.level, false);
+    }
+    // Draw highlighted stroke on top so it's never obscured
+    if (this.highlightedIdx !== null && this.highlightedIdx < this.strokes.length) {
+      const stroke = this.strokes[this.highlightedIdx];
+      const label = this.labels.find((l) => l.id === stroke.labelId);
+      const color = label?.color ?? "#ff0000";
+      this.drawStroke(stroke.points, color, stroke.level, true);
     }
 
     // Draw the in-progress stroke
@@ -127,13 +143,20 @@ export class BrushingCanvas {
     points: Array<[number, number]>,
     color: string,
     strokeLevel: number | null,
+    highlighted = false,
   ) {
     if (points.length === 0) return;
     const ctx = this.ctx;
     const meta = this.viewer.meta_;
 
     ctx.save();
-    ctx.fillStyle = hexToRgba(color, 0.65);
+    const opacity = highlighted ? 1.0 : 0.65;
+    const radiusBoost = highlighted ? 1.6 : 1.0;
+    ctx.fillStyle = hexToRgba(color, opacity);
+    if (highlighted) {
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 8;
+    }
 
     for (const [px, py] of points) {
       let ix = px;
@@ -145,7 +168,7 @@ export class BrushingCanvas {
         iy = py / scale;
       }
       const [cx, cy] = this.viewer.imageToCanvas(ix, iy);
-      const r = Math.max(1, this.brushSize * this.viewer.viewZoom);
+      const r = Math.max(1, this.brushSize * this.viewer.viewZoom) * radiusBoost;
       ctx.beginPath();
       ctx.arc(cx, cy, r, 0, Math.PI * 2);
       ctx.fill();
