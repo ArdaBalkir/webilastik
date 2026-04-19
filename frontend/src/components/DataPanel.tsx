@@ -33,7 +33,8 @@ export function DataPanel({ onLoad }: Props) {
   function loadUrl(url: string) {
     const normalized = normalizeUrl(url.trim());
     customUrl.value = normalized;
-    state.dziUrl.value = normalized;
+    // Save current strokes before switching, restore any saved strokes for new URL
+    state.switchTrainingSource(normalized);
     onLoad(normalized);
   }
 

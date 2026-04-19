@@ -61,7 +61,7 @@ export const exportStatus = signal<string>("");
 export const exportJobId = signal<string | null>(null);
 
 // Working level — null = use maxLevel (full res)
-export const workLevelOffset = signal<number>(0); // 0 = full res, 1 = half res, etc.
+export const workLevelOffset = signal<number>(2); // 0 = full res, 1 = half, 2 = quarter (25%)
 export const workLevel = computed(() => {
   const meta = dziMeta.value;
   if (!meta) return null;

@@ -199,20 +199,32 @@ export function App() {
     const fc = state.featureConfig.value;
     const filters = featureConfigToFilters(fc);
     if (filters.length === 0) { alert("Select at least one feature filter."); return; }
-    const strokes = state.strokes.value;
-    if (strokes.length === 0) { alert("Add some brush strokes first."); return; }
 
-    const req: TrainRequest = {
-      dzip_url: state.dziUrl.value,
-      dzi_name: state.dziName.value,
-      level,
-      strokes: strokes.map((s) => ({
-        label: s.labelId,
-        points: s.points.map(([x, y]) => {
-          const f = Math.pow(2, level - s.level);
-          return [Math.round(x * f), Math.round(y * f)] as [number, number];
-        }),
-      })),
+    // Collect strokes from ALL annotated images (current + saved per-source)
+    const allBySource: Record<string, import("./types").Stroke[]> = {
+      ...state.strokesBySource.value,
+    };
+    if (state.dziUrl.value) {
+      allBySource[state.dziUrl.value] = state.strokes.value;
+    }
+    const annotations = Object.entries(allBySource)
+      .filter(([, ss]) => ss.length > 0)
+      .map(([dzip_url, ss]) => ({
+        dzip_url,
+        level,
+        strokes: ss.map((s) => ({
+          label: s.labelId,
+          points: s.points.map(([x, y]) => {
+            const f = Math.pow(2, level - s.level);
+            return [Math.round(x * f), Math.round(y * f)] as [number, number];
+          }),
+        })),
+      }));
+
+    if (annotations.length === 0) { alert("Add some brush strokes first."); return; }
+
+    const req: import("./types").TrainMultiRequest = {
+      annotations,
       features: { filters, scales: fc.scales },
     };
 
@@ -220,7 +232,7 @@ export function App() {
     state.trainingError.value = "";
     try {
       const client = new ApiClient(state.serverUrl.value, state.bearerToken.value);
-      const res = await client.train(req);
+      const res = await client.trainMulti(req);
       state.classifierId.value = res.classifier_id;
       state.numClasses.value = res.num_classes;
       state.trainedLevel.value = level;
