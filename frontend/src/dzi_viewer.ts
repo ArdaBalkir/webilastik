@@ -149,7 +149,7 @@ export class DziViewer {
   private render() {
     const { ctx, canvas, meta, dzip } = this;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.fillStyle = "#1a1a1a";
+    ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     if (!meta || !dzip) return;

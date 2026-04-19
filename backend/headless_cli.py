@@ -641,6 +641,10 @@ def run(
             logger.info("  uploading → %s", dest_url)
             upload_dzip(dzip_path, dest_url, token)
             logger.info("  ✓ done")
+            # Free the downloaded source DZIP immediately to reclaim workdir space
+            if local_path and local_path.exists():
+                local_path.unlink(missing_ok=True)
+                logger.info("  cleaned %s from workdir", local_path.name)
         except Exception as e:
             logger.error("  ✗ FAILED: %s", e)
             failed.append(src_name)

@@ -18,7 +18,7 @@ from PIL import Image
 # Background is fully transparent so the source image shows through.
 
 _LABEL_COLORS: dict[int, tuple[int, int, int, int]] = {
-    1: (220, 50, 50, 200),  # label 1 → red
+    1: (255, 0, 0, 200),  # label 1 → red
     2: (0, 0, 0, 200),  # label 2 → black
     3: (50, 120, 220, 200),  # label 3 → blue
     4: (50, 200, 80, 200),  # label 4 → green

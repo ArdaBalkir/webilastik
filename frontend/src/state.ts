@@ -27,7 +27,7 @@ export const isLoadingImage = signal<boolean>(false);
 
 // Labels
 export const labels = signal<Label[]>([
-  { id: 1, name: "Foreground", color: "#e05252" },
+  { id: 1, name: "Foreground", color: "#ff0000" },
   { id: 2, name: "Background", color: "#6699ff" },
 ]);
 export const activeLabelId = signal<number>(1);
@@ -184,12 +184,18 @@ export const batchStatus = signal<BatchExportStatus | null>(null);
 // ── Project serialization ────────────────────────────────────────────────────
 
 export function saveProject(): void {
+  // Flush current image strokes into the per-source map before saving
+  const allBySource: Record<string, Stroke[]> = { ...strokesBySource.value };
+  if (dziUrl.value) {
+    allBySource[dziUrl.value] = strokes.value;
+  }
   const project: Project = {
     dziUrl: dziUrl.value,
     dziName: dziName.value,
     workLevel: workLevel.value,
     labels: labels.value,
     strokes: strokes.value,
+    strokesBySource: allBySource,
   };
   const json = JSON.stringify(project, null, 2);
   const blob = new Blob([json], { type: "application/json" });
@@ -208,6 +214,7 @@ export function loadProject(file: File): Promise<void> {
     dziName.value = project.dziName;
     labels.value = project.labels;
     strokes.value = project.strokes;
+    strokesBySource.value = project.strokesBySource ?? {};
     classifierId.value = null;
     trainingStatus.value = "idle";
   });

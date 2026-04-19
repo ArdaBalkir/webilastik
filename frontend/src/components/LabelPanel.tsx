@@ -5,7 +5,7 @@ import type { Label } from "../types";
 import { Plus } from "lucide-preact";
 
 const PALETTE = [
-  "#e05252",
+  "#ff0000",
   "#52aee0",
   "#52e06b",
   "#e0c452",

@@ -27,6 +27,8 @@ export interface Project {
   workLevel: number | null; // null = auto (maxLevel)
   labels: Label[];
   strokes: Stroke[];
+  /** Annotations for all images in a multi-image project, keyed by dzip object_url. */
+  strokesBySource?: Record<string, Stroke[]>;
 }
 
 // ── Feature configuration ────────────────────────────────────────────────────
