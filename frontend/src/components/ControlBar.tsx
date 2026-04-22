@@ -110,7 +110,7 @@ export function ControlBar({ onTrain, onExport }: Props) {
             onClick={onExport}
             disabled={state.exportStatus.value === "submitting"}
           >
-            {state.exportStatus.value === "submitting" ? "Submitting…" : "Export to HPC"}
+            {state.exportStatus.value === "submitting" ? "Submitting…" : "Segment all images"}
           </button>
           {state.exportStatus.value && state.exportStatus.value !== "submitting" && (
             <p class="status">{state.exportStatus.value}</p>

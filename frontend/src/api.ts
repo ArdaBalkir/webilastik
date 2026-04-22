@@ -150,6 +150,13 @@ export class ApiClient {
     );
   }
 
+  async listObjects(dirUrl: string, ext: string): Promise<SourceEntry[]> {
+    return this.request(
+      "GET",
+      `/list-sources?url=${encodeURIComponent(dirUrl)}&ext=${encodeURIComponent(ext)}`,
+    );
+  }
+
   async startBatchExport(req: BatchExportRequest): Promise<{ job_id: string }> {
     return this.request("POST", "/batch-export", req);
   }

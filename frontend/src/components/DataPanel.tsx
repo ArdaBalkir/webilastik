@@ -77,6 +77,51 @@ export function DataPanel({ onLoad }: Props) {
     checkedUrls.value = next;
   }
 
+  // Cloud project picker
+  const showProjectPicker = useSignal(false);
+  const projectEntries = useSignal<SourceEntry[]>([]);
+  const projectPickerLoading = useSignal(false);
+  const projectPickerError = useSignal("");
+
+  async function openProjectPicker() {
+    showProjectPicker.value = true;
+    projectPickerError.value = "";
+    projectEntries.value = [];
+    const currentUrl = state.dziUrl.value;
+    const match = currentUrl.match(/\/v1\/buckets\/([^/]+)\//);
+    if (!match) {
+      projectPickerError.value = "Open a data-proxy image first so the bucket is known.";
+      return;
+    }
+    const bucket = match[1];
+    const dir = `https://data-proxy.ebrains.eu/api/v1/buckets/${bucket}/ilastikProjectSaves/`;
+    projectPickerLoading.value = true;
+    try {
+      projectEntries.value = await new ApiClient(
+        state.serverUrl.value, state.bearerToken.value,
+      ).listObjects(dir, ".json");
+    } catch (e) {
+      projectPickerError.value = String(e);
+    }
+    projectPickerLoading.value = false;
+  }
+
+  async function loadCloudProject(objectUrl: string) {
+    showProjectPicker.value = false;
+    try {
+      const headers: Record<string, string> = state.bearerToken.value
+        ? { Authorization: `Bearer ${state.bearerToken.value}` } : {};
+      const res = await fetch(objectUrl, { headers });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      const file = new File([text], "project.json", { type: "application/json" });
+      await loadProject(file);
+      onLoad(state.dziUrl.value);
+    } catch (e) {
+      state.loadError.value = `Cloud load failed: ${e}`;
+    }
+  }
+
   function confirmSelection() {
     const selected = browseSources.value.filter((s) =>
       checkedUrls.value.has(s.object_url),
@@ -220,10 +265,33 @@ export function DataPanel({ onLoad }: Props) {
       <div class="row divider-row">
         <button class="btn-sm" onClick={saveProject}>Save project</button>
         <label class="btn-sm btn-file">
-          Load project…
+          Load local…
           <input type="file" accept=".json" onChange={handleProjectLoad} />
         </label>
+        <button class="btn-sm" onClick={openProjectPicker}>Load cloud…</button>
       </div>
+
+      {/* Cloud project picker */}
+      {showProjectPicker.value && (
+        <div class="source-picker">
+          <div class="row" style={{ justifyContent: "space-between" }}>
+            <span class="hint">ilastikProjectSaves/</span>
+            <button class="btn-icon" onClick={() => (showProjectPicker.value = false)}>×</button>
+          </div>
+          {projectPickerLoading.value && <p class="status">Loading…</p>}
+          {projectPickerError.value && <p class="status error">{projectPickerError.value}</p>}
+          <ul class="source-list">
+            {projectEntries.value.map((s) => (
+              <li key={s.object_url} class="source-item" onClick={() => loadCloudProject(s.object_url)}>
+                <span class="source-name">{s.name}</span>
+              </li>
+            ))}
+            {!projectPickerLoading.value && projectEntries.value.length === 0 && !projectPickerError.value && (
+              <li class="source-item" style={{ color: "#666" }}>No saved projects found</li>
+            )}
+          </ul>
+        </div>
+      )}
 
       {/* Advanced: server, token, direct URL, local file */}
       <details class="adv-details">

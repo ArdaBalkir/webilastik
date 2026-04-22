@@ -148,14 +148,12 @@ export const annotatedImageCount = computed(() => {
 
 /** Switch the active image for annotation. Saves + restores strokes. */
 export function switchTrainingSource(objectUrl: string) {
-  // Save current strokes under current dziUrl
   if (dziUrl.value) {
-    strokesBySource.value = {
-      ...strokesBySource.value,
-      [dziUrl.value]: strokes.value,
-    };
+    strokesBySource.value = { ...strokesBySource.value, [dziUrl.value]: strokes.value };
   }
-  // Restore strokes for new source
+  // Update dziUrl immediately so computed signals (totalAnnotatedStrokes) stay
+  // consistent during the async image load that follows.
+  dziUrl.value = objectUrl;
   strokes.value = strokesBySource.value[objectUrl] ?? [];
 }
 
@@ -219,10 +217,14 @@ export function saveProject(): void {
   // ── 1. Always download locally ───────────────────────────────────────────
   const blob = new Blob([json], { type: "application/json" });
   const blobUrl = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = blobUrl;
-  a.download = "project.json";
+  const a = Object.assign(document.createElement("a"), {
+    href: blobUrl,
+    download: "project.json",
+    style: "display:none",
+  });
+  document.body.appendChild(a);
   a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(blobUrl);
 
   // ── 2. Also upload to bucketName/ilastikProjectSaves/ in data proxy ──────

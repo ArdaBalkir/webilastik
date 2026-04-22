@@ -696,6 +696,7 @@ async def export_status(
 @app.get("/list-sources")
 async def list_sources(
     url: str,
+    ext: str = ".dzip",
     authorization: Optional[str] = Header(default=None),
 ):
     """
@@ -735,7 +736,7 @@ async def list_sources(
             resp = r.json()
             results = []
             for obj in resp.get("objects", []):
-                if "name" in obj and obj["name"].endswith(".dzip"):
+                if "name" in obj and obj["name"].endswith(ext):
                     results.append(
                         {
                             "name": obj["name"].split("/")[-1],
@@ -743,7 +744,7 @@ async def list_sources(
                             "bytes": obj.get("bytes"),
                         }
                     )
-            logger.info("[list-sources] found %d DZIPs", len(results))
+            logger.info("[list-sources] found %d %s files", len(results), ext)
             return results
         raise HTTPException(
             status_code=400, detail="Only data-proxy URLs are supported"
