@@ -183,8 +183,35 @@ export function App() {
       state.dziName.value = viewerRef.current!.dziName ?? "";
       state.dziUrl.value = url;
       state.isLoadingImage.value = false;
-      state.classifierId.value = null;
-      state.trainingStatus.value = "idle";
+
+      // Re-fire onViewChanged so the brushing canvas immediately redraws
+      // strokes at the correct positions for the freshly loaded image's
+      // pan/zoom, rather than waiting for the next user interaction.
+      viewerRef.current!.onViewChanged?.();
+
+      // If a classifier is already trained, re-point the prediction overlay at
+      // the new image instead of discarding it. The tile URL function is
+      // rebuilt with the new dzip_url / dzi_name while keeping the same
+      // classifier_id, so predictions appear immediately on the new image.
+      const existingId = state.classifierId.value;
+      if (existingId) {
+        const client = new ApiClient(state.serverUrl.value, state.bearerToken.value);
+        const fc = state.featureConfig.value;
+        const newDziName = viewerRef.current!.dziName ?? "";
+        const tLevel = state.trainedLevel.value ?? state.workLevel.value ?? 0;
+        predRef.current?.setLockedLevel(tLevel);
+        predRef.current?.setTileUrlFn((level: number, col: number, row: number) =>
+          client.predictionTileUrl({
+            classifierId: existingId,
+            level, col, row,
+            dzipUrl: url,
+            dziName: newDziName,
+            featureConfig: fc,
+          }),
+        );
+      } else {
+        state.trainingStatus.value = "idle";
+      }
       predRef.current?.clearCache();
     } catch (err) {
       state.loadError.value = String(err);

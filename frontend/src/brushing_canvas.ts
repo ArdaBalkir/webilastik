@@ -376,6 +376,8 @@ export class PredictionOverlay {
 
     ctx.save();
     ctx.globalAlpha = this.opacity;
+    // Disable smoothing so prediction overlay pixels are as crisp as the source tiles.
+    ctx.imageSmoothingEnabled = false;
 
     for (let row = rowMin; row <= rowMax; row++) {
       for (let col = colMin; col <= colMax; col++) {

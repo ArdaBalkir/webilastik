@@ -151,6 +151,9 @@ export class DziViewer {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
+    // Disable bilinear smoothing when zoomed in so individual pixels are crisp.
+    // Keep it on when zoomed out so downscaled tiles look smooth.
+    ctx.imageSmoothingEnabled = this.zoom < 1;
 
     if (!meta || !dzip) return;
 

@@ -103,6 +103,23 @@ export const trainingSourcesError = signal<string>("");
 // Per-image strokes keyed by object_url — persists annotations across image switches
 export const strokesBySource = signal<Record<string, Stroke[]>>({});
 
+// Quick-switch list: images the user has pinned for fast access
+export const pinnedSources = signal<SourceEntry[]>([]);
+
+/** Add entries to pinnedSources, skipping duplicates. */
+export function pinSources(entries: SourceEntry[]): void {
+  const existing = new Set(pinnedSources.value.map((s) => s.object_url));
+  const toAdd = entries.filter((e) => !existing.has(e.object_url));
+  if (toAdd.length > 0) pinnedSources.value = [...pinnedSources.value, ...toAdd];
+}
+
+/** Remove a single entry from the pinned list. */
+export function unpinSource(objectUrl: string): void {
+  pinnedSources.value = pinnedSources.value.filter(
+    (s) => s.object_url !== objectUrl,
+  );
+}
+
 /** Total stroke count across all annotated images (including current). */
 export const totalAnnotatedStrokes = computed(() => {
   const bySource = strokesBySource.value;
@@ -198,13 +215,43 @@ export function saveProject(): void {
     strokesBySource: allBySource,
   };
   const json = JSON.stringify(project, null, 2);
+
+  // ── 1. Always download locally ───────────────────────────────────────────
   const blob = new Blob([json], { type: "application/json" });
-  const url = URL.createObjectURL(blob);
+  const blobUrl = URL.createObjectURL(blob);
   const a = document.createElement("a");
-  a.href = url;
+  a.href = blobUrl;
   a.download = "project.json";
   a.click();
-  URL.revokeObjectURL(url);
+  URL.revokeObjectURL(blobUrl);
+
+  // ── 2. Also upload to bucketName/ilastikProjectSaves/ in data proxy ──────
+  // Only possible when: a data-proxy image is loaded, a bearer token is set,
+  // and a compute server URL is configured.
+  const currentUrl = dziUrl.value;
+  const token = bearerToken.value;
+  const server = serverUrl.value;
+  if (currentUrl && token && server) {
+    const match = currentUrl.match(/\/v1\/buckets\/([^/]+)\//);
+    if (match) {
+      const bucket = match[1];
+      // Use ISO timestamp, replacing characters not allowed in object names
+      const ts = new Date().toISOString().replace(/[:.]/g, "-");
+      const destUrl =
+        `https://data-proxy.ebrains.eu/api/v1/buckets/${bucket}` +
+        `/ilastikProjectSaves/project_${ts}.json`;
+      import("./api").then(({ ApiClient }) => {
+        new ApiClient(server, token)
+          .saveProjectToProxy(json, destUrl)
+          .then((res) =>
+            console.info(`[webilastik] Project saved to data proxy: ${res.url}`),
+          )
+          .catch((err) =>
+            console.warn(`[webilastik] Cloud save failed (local copy still downloaded): ${err}`),
+          );
+      });
+    }
+  }
 }
 
 export function loadProject(file: File): Promise<void> {

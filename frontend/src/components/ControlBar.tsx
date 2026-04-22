@@ -16,7 +16,7 @@ export function ControlBar({ onTrain, onExport }: Props) {
   const opacity = state.predictionOpacity.value;
   const brushSz = state.brushSize.value;
   const strokes = state.strokes.value;
-  const canTrain = strokes.length > 0 && trainStatus !== "training";
+  const canTrain = state.totalAnnotatedStrokes.value > 0 && trainStatus !== "training";
 
   return (
     <section class="panel">

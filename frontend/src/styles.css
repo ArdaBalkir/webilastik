@@ -482,6 +482,10 @@ select {
   color: #ddd;
 }
 
+.source-item.checked {
+  background: #0d2e2b;
+}
+
 .source-meta {
   display: flex;
   align-items: center;
@@ -952,3 +956,81 @@ select {
   flex-shrink: 0;
 }
 
+
+/* -- Quick-switch strip ---------------------------------------------------- */
+.quick-switch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid #2a4a47;
+  border-radius: 4px;
+  padding: 6px 8px;
+  background: #1a2622;
+}
+
+.quick-switch-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #3dd6c0;
+  font-weight: 600;
+}
+
+.quick-switch-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.quick-switch-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.quick-switch-btn {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: #252525;
+  border: 1px solid #333;
+  border-radius: 3px;
+  color: #ccc;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 4px 7px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+.quick-switch-btn:hover { background: #2a3a38; color: #fff; border-color: #3dd6c0; }
+
+.quick-switch-item.active .quick-switch-btn {
+  background: #0d2e2b;
+  border-color: #3dd6c0;
+  color: #3dd6c0;
+  font-weight: 600;
+}
+
+.quick-switch-remove {
+  flex-shrink: 0;
+  opacity: 0;
+  transition: opacity 0.1s;
+}
+.quick-switch-item:hover .quick-switch-remove { opacity: 1; }
+
+.stroke-dot {
+  display: inline-block;
+  flex-shrink: 0;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #3dd6c0;
+  box-shadow: 0 0 4px #3dd6c0;
+}

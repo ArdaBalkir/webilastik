@@ -157,6 +157,21 @@ export class ApiClient {
   async getBatchExportStatus(jobId: string): Promise<BatchExportStatus> {
     return this.request("GET", `/batch-export/${jobId}`);
   }
+
+  /**
+   * POST /save-project — upload project JSON to the EBRAINS data-proxy.
+   * The backend performs the two-step presigned-S3 PUT on behalf of the browser.
+   * Returns the canonical object URL where the file was stored.
+   */
+  async saveProjectToProxy(
+    jsonContent: string,
+    destUrl: string,
+  ): Promise<{ status: string; url: string; bytes: number }> {
+    return this.request("POST", "/save-project", {
+      json_content: jsonContent,
+      dest_url: destUrl,
+    });
+  }
 }
 
 export interface HpcJobRequest {

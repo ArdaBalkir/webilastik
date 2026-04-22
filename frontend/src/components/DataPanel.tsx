@@ -1,7 +1,7 @@
 import { h } from "preact";
 import { useSignal } from "@preact/signals";
 import * as state from "../state";
-import { saveProject, loadProject } from "../state";
+import { saveProject, loadProject, pinSources, unpinSource } from "../state";
 import { ApiClient } from "../api";
 import type { SourceEntry } from "../types";
 
@@ -22,6 +22,8 @@ export function DataPanel({ onLoad }: Props) {
   const browseSources = useSignal<SourceEntry[]>([]);
   const browseLoading = useSignal(false);
   const browseError = useSignal("");
+  // Tracks which source_urls are ticked in the picker
+  const checkedUrls = useSignal<Set<string>>(new Set());
 
   function normalizeUrl(raw: string): string {
     return raw.replace(
@@ -54,6 +56,7 @@ export function DataPanel({ onLoad }: Props) {
 
   async function openBrowse() {
     showBrowse.value = true;
+    checkedUrls.value = new Set();
     const dir = state.sourceDir.value;
     if (!dir) { browseError.value = "Set ?workdir= in the URL first."; return; }
     browseLoading.value = true;
@@ -68,9 +71,58 @@ export function DataPanel({ onLoad }: Props) {
     browseLoading.value = false;
   }
 
+  function toggleCheck(url: string) {
+    const next = new Set(checkedUrls.value);
+    if (next.has(url)) next.delete(url); else next.add(url);
+    checkedUrls.value = next;
+  }
+
+  function confirmSelection() {
+    const selected = browseSources.value.filter((s) =>
+      checkedUrls.value.has(s.object_url),
+    );
+    if (selected.length > 0) pinSources(selected);
+    showBrowse.value = false;
+    checkedUrls.value = new Set();
+  }
+
   return (
     <section class="panel">
       <h2>Image</h2>
+
+      {/* Quick-switch strip — always visible when images are pinned */}
+      {state.pinnedSources.value.length > 0 && (
+        <div class="quick-switch">
+          <span class="quick-switch-label">Quick switch</span>
+          <ul class="quick-switch-list">
+            {state.pinnedSources.value.map((s) => (
+              <li
+                key={s.object_url}
+                class={`quick-switch-item${
+                  state.dziUrl.value === s.object_url ? " active" : ""
+                }`}
+              >
+                <button
+                  class="quick-switch-btn"
+                  title={s.object_url}
+                  onClick={() => loadUrl(s.object_url)}
+                >
+                  {s.name}
+                  {Object.keys(state.strokesBySource.value).includes(s.object_url) &&
+                    (state.strokesBySource.value[s.object_url]?.length ?? 0) > 0 && (
+                    <span class="stroke-dot" title="Has annotations" />
+                  )}
+                </button>
+                <button
+                  class="btn-icon quick-switch-remove"
+                  title="Remove from list"
+                  onClick={(e) => { e.stopPropagation(); unpinSource(s.object_url); }}
+                >×</button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
       {/* Primary action: Browse data-proxy */}
       <button
@@ -94,16 +146,37 @@ export function DataPanel({ onLoad }: Props) {
           {browseLoading.value && <p class="status">Loading…</p>}
           {browseError.value && <p class="status error">{browseError.value}</p>}
           <ul class="source-list">
-            {browseSources.value.map((s) => (
-              <li
-                key={s.object_url}
-                class={`source-item${state.dziUrl.value === s.object_url ? " active" : ""}`}
-                onClick={() => { showBrowse.value = false; loadUrl(s.object_url); }}
-              >
-                <span class="source-name">{s.name}</span>
-              </li>
-            ))}
+            {browseSources.value.map((s) => {
+              const checked = checkedUrls.value.has(s.object_url);
+              return (
+                <li
+                  key={s.object_url}
+                  class={`source-item${state.dziUrl.value === s.object_url ? " active" : ""}${
+                    checked ? " checked" : ""
+                  }`}
+                  onClick={() => toggleCheck(s.object_url)}
+                >
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => toggleCheck(s.object_url)}
+                    onClick={(e) => e.stopPropagation()}
+                  />
+                  <span class="source-name">{s.name}</span>
+                </li>
+              );
+            })}
           </ul>
+          <div class="row" style={{ justifyContent: "space-between", marginTop: 2 }}>
+            <button
+              class="btn btn-train"
+              style={{ flex: 1 }}
+              disabled={checkedUrls.value.size === 0}
+              onClick={confirmSelection}
+            >
+              Add {checkedUrls.value.size > 0 ? checkedUrls.value.size : ""} to quick-switch
+            </button>
+          </div>
         </div>
       )}
 

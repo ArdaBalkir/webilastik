@@ -378,12 +378,53 @@ class HeadlessRequest(BaseModel):
     output_dir: str  # output directory URL
 
 
+class SaveProjectRequest(BaseModel):
+    """
+    Upload a project JSON blob to the user's data-proxy bucket so it can be
+    shared across sessions / machines without manual file downloads.
+    The caller is responsible for supplying a canonical data-proxy object URL:
+      https://data-proxy.ebrains.eu/api/v1/buckets/{bucket}/ilastikProjectSaves/{name}.json
+    """
+
+    json_content: str  # serialised project JSON
+    dest_url: str  # full data-proxy object URL to PUT to
+
+
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 
 @app.get("/health")
 async def health():
     return {"status": "ok", "classifiers": len(_classifiers)}
+
+
+@app.post("/save-project")
+async def save_project_to_proxy(
+    req: SaveProjectRequest,
+    authorization: Optional[str] = Header(default=None),
+):
+    """
+    Write *json_content* to *dest_url* in the EBRAINS data-proxy using the
+    two-step pre-signed S3 upload.  A bearer token is required.
+    Destination should follow the convention:
+      …/buckets/{bucket}/ilastikProjectSaves/{filename}.json
+    """
+    token = None
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+    if not token:
+        raise HTTPException(
+            status_code=401, detail="Authorization bearer token required"
+        )
+
+    data = req.json_content.encode("utf-8")
+    try:
+        await _run(_dp_put, req.dest_url, data, token)
+    except Exception as exc:
+        logger.warning("save-project upload failed: %s", exc)
+        raise HTTPException(status_code=502, detail=f"Upload failed: {exc}") from exc
+
+    return {"status": "ok", "url": req.dest_url, "bytes": len(data)}
 
 
 @app.get("/dzi-info")
