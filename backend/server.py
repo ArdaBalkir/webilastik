@@ -194,8 +194,9 @@ def _build_prediction_dzip(
     dzip_src = _get_dzip(dzip_url, authorization)
     _, meta = dzip_src.find_dzi()
 
-    # Use the requested level; fall back to max (full res)
-    level = level if level is not None else meta.max_level
+    # Use the requested level; clamp to max_level so we never request tiles
+    # that don't exist in the source (which would silently produce empty output).
+    level = min(level, meta.max_level) if level is not None else meta.max_level
     scale = 2.0 ** (level - meta.max_level)
     lw = max(1, round(meta.width * scale))
     lh = max(1, round(meta.height * scale))

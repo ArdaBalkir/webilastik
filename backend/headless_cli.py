@@ -405,7 +405,9 @@ def build_prediction_dzip(
             dzip_url, session=_make_session(workers, token), bearer_token=token
         )
     _, meta = src.find_dzi()
-    level = level if level is not None else meta.max_level
+    # Clamp to max_level: requesting a level that doesn't exist in the source
+    # zip silently yields an empty tile cache and a manifest-only output.
+    level = min(level, meta.max_level) if level is not None else meta.max_level
     scale = 2.0 ** (level - meta.max_level)
     lw = max(1, round(meta.width * scale))
     lh = max(1, round(meta.height * scale))
@@ -438,17 +440,23 @@ def build_prediction_dzip(
         import zipfile as _zf
 
         tile_cache = {}
+        import re as _re
+
+        _tile_re = _re.compile(r"^.+_files/" + str(level) + r"/(\d+)_(\d+)\.\w+$")
         with _zf.ZipFile(local_path) as zf:
-            for col, row in tile_coords:
-                path = f"{dzi_name}_files/{level}/{col}_{row}.{meta.format}"
-                try:
-                    tile_cache[(col, row)] = zf.read(path)
-                except KeyError:
-                    pass  # missing tile — process_tile will skip it
+            # Scan the zip's actual entries at the target level rather than
+            # constructing paths from dzi_name + format, which may not match
+            # what was actually stored (different filename conventions, .jpg vs
+            # .jpeg, etc.).
+            for entry in zf.namelist():
+                m = _tile_re.match(entry)
+                if m:
+                    tile_cache[(int(m.group(1)), int(m.group(2)))] = zf.read(entry)
         logger.info(
-            "  preloaded %d tiles (%.1f MB)",
+            "  preloaded %d tiles (%.1f MB) from zip at level %d",
             len(tile_cache),
             sum(len(v) for v in tile_cache.values()) / 1e6,
+            level,
         )
 
     errors: list[str] = []
