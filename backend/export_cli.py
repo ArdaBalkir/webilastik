@@ -102,12 +102,6 @@ def _train(dzip, project: dict, level: int, bearer_token: Optional[str]):
     return clf, meta, dzi_name
 
 
-def _encode_png(proba: np.ndarray) -> bytes:
-    from backend.server import _encode_prediction_png
-
-    return _encode_prediction_png(proba)
-
-
 def main():
     parser = argparse.ArgumentParser(description="Webilastik 2.0 HPC export")
     parser.add_argument("--project", required=True, help="Path to project.json")
@@ -165,7 +159,7 @@ def main():
     output_dir = args.output_url.rstrip("/")
     print(f"Exporting {total} tiles → {output_dir}/  ({args.workers} workers)")
 
-    # Upload .dzi manifest first
+    # Build the .dzi manifest XML (uploaded LAST, after all tiles succeed)
     dzi_xml = (
         f'<?xml version="1.0" encoding="utf-8"?>\n'
         f'<Image xmlns="http://schemas.microsoft.com/deepzoom/2008"\n'
@@ -182,10 +176,6 @@ def main():
                 s.headers.update({"Authorization": f"Bearer {token}"})
             _local.s = s
         return _local.s
-
-    manifest_url = f"{output_dir}/{dzi_name}_predictions.dzi"
-    _session().put(manifest_url, data=dzi_xml.encode(), timeout=30).raise_for_status()
-    print(f"  Uploaded manifest → {manifest_url}")
 
     done = 0
     failed = 0
@@ -206,11 +196,13 @@ def main():
     def process_tile(col: int, row: int) -> None:
         nonlocal done, failed
         try:
+            from backend.encoding import encode_prediction_png
+
             tile_arr = dzip.get_tile(dzi_name, level, col, row, meta.format)
             feat = _extract_features(tile_arr, filters, scales_list)
             h, w = tile_arr.shape[:2]
             proba = clf.predict_proba(feat).reshape(h, w, -1)
-            png = _encode_png(proba)
+            png = encode_prediction_png(proba, clf.classes_.tolist())
             path = f"{dzi_name}_predictions/{level}/{col}_{row}.png"
             _put_with_retry(f"{output_dir}/{path}", png)
         except Exception as e:
@@ -250,6 +242,14 @@ def main():
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Upload .dzi manifest LAST — only after all tiles are confirmed uploaded.
+    # This way a job killed mid-run (TIMEOUT, PREEMPTED, etc.) leaves no
+    # navigable-but-broken output: the viewer won't find a .dzi and will treat
+    # the output as absent rather than incomplete.
+    manifest_url = f"{output_dir}/{dzi_name}_predictions.dzi"
+    _session().put(manifest_url, data=dzi_xml.encode(), timeout=30).raise_for_status()
+    print(f"  Uploaded manifest → {manifest_url}")
 
 
 if __name__ == "__main__":
