@@ -28,11 +28,31 @@ body {
   flex: 0 0 260px;
   background: #1e1e1e;
   border-right: 1px solid #333;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.sidebar-scroll {
+  flex: 1 1 0;
+  min-height: 0;
   overflow-y: auto;
-  padding: 8px 10px 20px;
+  overflow-x: hidden;
+  padding: 8px 10px 8px;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+.sidebar-footer {
+  flex-shrink: 0;
+  padding: 8px 10px;
+  border-top: 1px solid #333;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: #1e1e1e;
 }
 
 .app-title {
@@ -123,6 +143,17 @@ body {
 }
 .btn-train:hover:not(:disabled) { background: #239e8e; }
 .btn-train.loading { background: #115f55; }
+
+.btn-save-cloud {
+  background: #2a3a5c;
+  border-color: #5a80d0;
+  color: #fff;
+  width: 100%;
+  padding: 7px;
+  font-weight: 600;
+}
+.btn-save-cloud:hover:not(:disabled) { background: #354a70; }
+.btn-save-cloud:disabled { opacity: 0.5; cursor: default; }
 
 .btn-export {
   background: #2a5c8a;

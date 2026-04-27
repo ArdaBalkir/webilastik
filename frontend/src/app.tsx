@@ -10,6 +10,7 @@ import { ControlBar } from "./components/ControlBar";
 import { DataPanel } from "./components/DataPanel";
 import { JobStatusPanel } from "./components/JobStatusPanel";
 import type { TrainRequest } from "./types";
+import { saveProjectToCloud } from "./state";
 
 /** Parse URL query params once at startup into state signals. */
 function readUrlParams() {
@@ -29,6 +30,8 @@ export function App() {
   const viewerRef = useRef<DziViewer | null>(null);
   const brushRef = useRef<BrushingCanvas | null>(null);
   const predRef = useRef<PredictionOverlay | null>(null);
+  const saveStatus = useSignal<"idle" | "saving" | "saved" | "error">("idle");
+  const saveMsg = useSignal<string>("");
 
   // Read URL params once
   useEffect(() => {
@@ -318,13 +321,43 @@ export function App() {
     }
   }
 
+  async function handleSave() {
+    saveStatus.value = "saving";
+    saveMsg.value = "";
+    try {
+      const url = await saveProjectToCloud();
+      saveStatus.value = "saved";
+      saveMsg.value = `✓ Saved to ${url.split("/").pop()}`;
+      setTimeout(() => { saveStatus.value = "idle"; saveMsg.value = ""; }, 4000);
+    } catch (err) {
+      saveStatus.value = "error";
+      saveMsg.value = String(err);
+    }
+  }
+
   return (
     <div class="app-root">
       <aside class="sidebar">
-        <DataPanel onLoad={handleLoadImage} />
-        <FeaturePanel />
-        <ControlBar onTrain={handleTrain} onExport={handleExport} />
-        <JobStatusPanel />
+        <div class="sidebar-scroll">
+          <DataPanel onLoad={handleLoadImage} />
+          <FeaturePanel />
+          <ControlBar onTrain={handleTrain} onExport={handleExport} />
+          <JobStatusPanel />
+        </div>
+        <div class="sidebar-footer">
+          <button
+            class="btn btn-save-cloud"
+            onClick={handleSave}
+            disabled={saveStatus.value === "saving"}
+          >
+            {saveStatus.value === "saving" ? "Saving…" : "☁️ Save project"}
+          </button>
+          {saveMsg.value && (
+            <p class={saveStatus.value === "error" ? "error" : "status"}>
+              {saveMsg.value}
+            </p>
+          )}
+        </div>
       </aside>
       <div class="viewer-area" ref={viewerContainerRef} />
     </div>

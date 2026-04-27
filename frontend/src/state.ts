@@ -198,7 +198,7 @@ export const batchStatus = signal<BatchExportStatus | null>(null);
 
 // ── Project serialization ────────────────────────────────────────────────────
 
-export function saveProject(): void {
+export async function saveProjectToCloud(): Promise<string> {
   // Flush current image strokes into the per-source map before saving
   const allBySource: Record<string, Stroke[]> = { ...strokesBySource.value };
   if (dziUrl.value) {
@@ -214,46 +214,24 @@ export function saveProject(): void {
   };
   const json = JSON.stringify(project, null, 2);
 
-  // ── 1. Always download locally ───────────────────────────────────────────
-  const blob = new Blob([json], { type: "application/json" });
-  const blobUrl = URL.createObjectURL(blob);
-  const a = Object.assign(document.createElement("a"), {
-    href: blobUrl,
-    download: "project.json",
-    style: "display:none",
-  });
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(blobUrl);
-
-  // ── 2. Also upload to bucketName/ilastikProjectSaves/ in data proxy ──────
-  // Only possible when: a data-proxy image is loaded, a bearer token is set,
-  // and a compute server URL is configured.
   const currentUrl = dziUrl.value;
   const token = bearerToken.value;
   const server = serverUrl.value;
-  if (currentUrl && token && server) {
-    const match = currentUrl.match(/\/v1\/buckets\/([^/]+)\//);
-    if (match) {
-      const bucket = match[1];
-      // Use ISO timestamp, replacing characters not allowed in object names
-      const ts = new Date().toISOString().replace(/[:.]/g, "-");
-      const destUrl =
-        `https://data-proxy.ebrains.eu/api/v1/buckets/${bucket}` +
-        `/ilastikProjectSaves/project_${ts}.json`;
-      import("./api").then(({ ApiClient }) => {
-        new ApiClient(server, token)
-          .saveProjectToProxy(json, destUrl)
-          .then((res) =>
-            console.info(`[webilastik] Project saved to data proxy: ${res.url}`),
-          )
-          .catch((err) =>
-            console.warn(`[webilastik] Cloud save failed (local copy still downloaded): ${err}`),
-          );
-      });
-    }
+  if (!currentUrl || !token || !server) {
+    throw new Error("Open a data-proxy image with a bearer token first.");
   }
+  const match = currentUrl.match(/\/v1\/buckets\/([^/]+)\//);
+  if (!match) {
+    throw new Error("Could not determine bucket from the current image URL.");
+  }
+  const bucket = match[1];
+  const ts = new Date().toISOString().replace(/[:.]/g, "-");
+  const destUrl =
+    `https://data-proxy.ebrains.eu/api/v1/buckets/${bucket}` +
+    `/ilastikProjectSaves/project_${ts}.json`;
+  const { ApiClient } = await import("./api");
+  const res = await new ApiClient(server, token).saveProjectToProxy(json, destUrl);
+  return res.url;
 }
 
 export function loadProject(file: File): Promise<void> {

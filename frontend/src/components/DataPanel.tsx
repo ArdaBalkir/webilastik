@@ -1,7 +1,7 @@
 import { h } from "preact";
 import { useSignal } from "@preact/signals";
 import * as state from "../state";
-import { saveProject, loadProject, pinSources, unpinSource } from "../state";
+import { loadProject, pinSources, unpinSource } from "../state";
 import { ApiClient } from "../api";
 import type { SourceEntry } from "../types";
 
@@ -38,20 +38,6 @@ export function DataPanel({ onLoad }: Props) {
     // Save current strokes before switching, restore any saved strokes for new URL
     state.switchTrainingSource(normalized);
     onLoad(normalized);
-  }
-
-  function handleFileInput(e: Event) {
-    const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    loadUrl(URL.createObjectURL(file));
-  }
-
-  function handleProjectLoad(e: Event) {
-    const input = e.target as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    loadProject(file).then(() => onLoad(state.dziUrl.value));
   }
 
   async function openBrowse() {
@@ -176,7 +162,7 @@ export function DataPanel({ onLoad }: Props) {
         onClick={openBrowse}
         disabled={browseLoading.value}
       >
-        {browseLoading.value ? "Loading…" : "Browse data-proxy"}
+        {browseLoading.value ? "Loading…" : "Select training images"}
       </button>
 
       {/* Inline source picker */}
@@ -263,12 +249,7 @@ export function DataPanel({ onLoad }: Props) {
       )}
 
       <div class="row divider-row">
-        <button class="btn-sm" onClick={saveProject}>Save project</button>
-        <label class="btn-sm btn-file">
-          Load local…
-          <input type="file" accept=".json" onChange={handleProjectLoad} />
-        </label>
-        <button class="btn-sm" onClick={openProjectPicker}>Load cloud…</button>
+        <button class="btn-sm" onClick={openProjectPicker}>Load cloud project…</button>
       </div>
 
       {/* Cloud project picker */}
@@ -317,13 +298,6 @@ export function DataPanel({ onLoad }: Props) {
             >
               Open
             </button>
-          </div>
-
-          <div class="row">
-            <label class="btn-sm btn-file">
-              Local file…{" "}
-              <input type="file" accept=".dzip,.zip" onChange={handleFileInput} />
-            </label>
           </div>
 
           <div class="row">
