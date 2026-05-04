@@ -260,6 +260,7 @@ export class PredictionOverlay {
   private ctx: CanvasRenderingContext2D;
   private viewer: DziViewer;
 
+  private static readonly MAX_CONCURRENT = 6;
   private tileCache = new Map<string, HTMLImageElement | "loading" | "error">();
   private getTileUrl:
     | ((level: number, col: number, row: number) => string)
@@ -269,6 +270,8 @@ export class PredictionOverlay {
   private dirty = false;
   private rafId = 0;
   private lockedLevel: number | null = null;
+  private _inFlight = 0;
+  private _pending: Array<{ key: string; url: string }> = [];
 
   constructor(container: HTMLElement, viewer: DziViewer) {
     this.viewer = viewer;
@@ -316,6 +319,7 @@ export class PredictionOverlay {
 
   clearCache() {
     this.tileCache.clear();
+    this._pending = []; // drop queued-but-not-started requests
     this.dirty = true;
   }
 
@@ -404,19 +408,47 @@ export class PredictionOverlay {
             (renderH / scale) * viewer.viewZoom,
           );
         } else if (!cached) {
+          // Mark immediately so this tile isn't re-queued on the next frame.
           this.tileCache.set(key, "loading");
           const url = this.getTileUrl!(level, col, row);
-          const img = new Image();
-          img.onload = () => {
-            this.tileCache.set(key, img);
-            this.dirty = true;
-          };
-          img.onerror = () => this.tileCache.set(key, "error");
-          img.src = url;
+          if (this._inFlight < PredictionOverlay.MAX_CONCURRENT) {
+            this._startFetch(key, url);
+          } else {
+            this._pending.push({ key, url });
+          }
         }
       }
     }
     ctx.restore();
+  }
+
+  private _startFetch(key: string, url: string) {
+    this._inFlight++;
+    const img = new Image();
+    img.onload = () => {
+      this._inFlight--;
+      this.tileCache.set(key, img);
+      this.dirty = true;
+      this._flushPending();
+    };
+    img.onerror = () => {
+      this._inFlight--;
+      this.tileCache.set(key, "error");
+      this._flushPending();
+    };
+    img.src = url;
+  }
+
+  private _flushPending() {
+    while (
+      this._inFlight < PredictionOverlay.MAX_CONCURRENT &&
+      this._pending.length > 0
+    ) {
+      const { key, url } = this._pending.shift()!;
+      // Skip if the cache was cleared while this was queued.
+      if (this.tileCache.get(key) !== "loading") continue;
+      this._startFetch(key, url);
+    }
   }
 
   destroy() {

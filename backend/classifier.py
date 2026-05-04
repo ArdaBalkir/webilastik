@@ -92,7 +92,7 @@ class Classifier:
             self._clf = _SkRF(
                 n_estimators=self.n_estimators,
                 max_depth=self.max_depth,
-                n_jobs=-1,
+                n_jobs=2,  # cap per-job parallelism so concurrent trains don't starve each other
             )
             self._clf.fit(X, y)
             logger.debug(

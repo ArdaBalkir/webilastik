@@ -76,13 +76,42 @@ _DIST = pathlib.Path(__file__).parent.parent / "dist"
 if _DIST.is_dir():
     app.mount("/app", StaticFiles(directory=str(_DIST), html=True), name="ui")
 
-# ── Process pool for CPU-bound work ──────────────────────────────────────────
-_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
+# ── CPU executor pools ───────────────────────────────────────────────────────
+# Train/export are heavyweight (sklearn, feature extraction across tiles).
+# Keep them on a small pool so they don't starve live prediction requests.
+_CPUS = os.cpu_count() or 4
+# At most 2 concurrent train/export jobs; each gets up to _CPUS cores via sklearn.
+_train_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="train")
+# Tile prediction is fast per tile; allow more concurrency here.
+_predict_executor = ThreadPoolExecutor(max_workers=_CPUS, thread_name_prefix="predict")
+
+# Hard cap: refuse a 3rd simultaneous train so the queue never grows silently.
+_train_semaphore = asyncio.Semaphore(2)
 
 
-async def _run(fn, *args):
+async def _run_train(fn, *args):
+    """Run a CPU-heavy training/export task; returns HTTP 503 if already at capacity."""
+    if not _train_semaphore._value:  # non-blocking peek
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=503,
+            detail="Server busy — too many concurrent training jobs, please retry shortly",
+        )
+    async with _train_semaphore:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_train_executor, fn, *args)
+
+
+async def _run_predict(fn, *args):
+    """Run a lightweight predict/IO task."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_executor, fn, *args)
+    return await loop.run_in_executor(_predict_executor, fn, *args)
+
+
+# Keep _run as an alias for predict (used by misc lightweight helpers).
+async def _run(fn, *args):
+    return await _run_predict(fn, *args)
 
 
 # ── In-memory state ───────────────────────────────────────────────────────────
@@ -517,7 +546,7 @@ async def train(
         _classifiers[clf_id] = clf
         return clf_id, clf.n_classes
 
-    clf_id, n_classes = await _run(_train)
+    clf_id, n_classes = await _run_train(_train)
     return TrainResponse(classifier_id=clf_id, num_classes=n_classes)
 
 
@@ -594,7 +623,7 @@ async def train_multi(
         _classifiers[clf_id] = clf
         return clf_id, clf.n_classes
 
-    clf_id, n_classes = await _run(_train_multi)
+    clf_id, n_classes = await _run_train(_train_multi)
     return TrainResponse(classifier_id=clf_id, num_classes=n_classes)
 
 
@@ -639,7 +668,7 @@ async def predict_tile(
         return encode_prediction_png(proba, clf.classes_.tolist())
 
     try:
-        png_bytes = await _run(_predict)
+        png_bytes = await _run_predict(_predict)
     except KeyError:
         raise HTTPException(status_code=404, detail="Tile not found in archive")
     except Exception as e:
@@ -888,7 +917,7 @@ async def headless_run(
         return cid, int(np.unique(y).shape[0])
 
     try:
-        cid, num_cls = await _run(_train_headless)
+        cid, num_cls = await _run_train(_train_headless)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Training failed: {e}") from e
 
@@ -950,7 +979,7 @@ async def export_zip(
             shutil.rmtree(tmpdir, ignore_errors=True)
             logger.info("[export-zip] cleaned up tmpdir")
 
-    zip_bytes, filename = await _run(_do)
+    zip_bytes, filename = await _run_train(_do)
 
     if req.output_url:
         token: Optional[str] = None
@@ -1076,7 +1105,7 @@ async def _run_export(
                 shutil.rmtree(tmpdir, ignore_errors=True)
                 logger.info("[export-job %s] cleaned up tmpdir", job_id)
 
-        await _run(_do)
+        await _run_train(_do)
         _exports[job_id]["status"] = "done"
         _exports[job_id]["progress"] = 1.0
     except Exception as e:
@@ -1182,7 +1211,7 @@ async def _run_batch(
                     finally:
                         shutil.rmtree(tmpdir, ignore_errors=True)
 
-                zip_bytes, _ = await _run(_process)
+                zip_bytes, _ = await _run_train(_process)
 
                 def _upload(data=zip_bytes, target=dest_url):
                     logger.info(
