@@ -115,8 +115,25 @@ async def _run(fn, *args):
 
 
 # ── In-memory state ───────────────────────────────────────────────────────────
-# classifier_id → Classifier
-_classifiers: Dict[str, Classifier] = {}
+# classifier_id → {"clf": Classifier, "last_used": float}
+_CLF_TTL = 30 * 60  # 30 minutes
+_classifiers: Dict[str, Dict] = {}
+import time
+
+
+def _get_clf(classifier_id: str) -> "Classifier":
+    """Look up a classifier by ID, touch its last_used timestamp, or raise 404."""
+    entry = _classifiers.get(classifier_id)
+    if entry is None:
+        from fastapi import HTTPException
+
+        raise HTTPException(
+            status_code=404, detail="Classifier not found (may have expired)"
+        )
+    entry["last_used"] = time.time()
+    return entry["clf"]
+
+
 # (dzip_url, token) → DzipSource (reuse HTTP sessions per token)
 _dzip_cache: Dict[tuple, DzipSource] = {}
 # export job_id → dict with status/progress
@@ -423,6 +440,24 @@ class SaveProjectRequest(BaseModel):
 # ── Routes ────────────────────────────────────────────────────────────────────
 
 
+@app.on_event("startup")
+async def _start_eviction_loop():
+    async def _evict():
+        while True:
+            await asyncio.sleep(60)
+            now = time.time()
+            expired = [
+                k
+                for k, v in list(_classifiers.items())
+                if now - v["last_used"] > _CLF_TTL
+            ]
+            for k in expired:
+                _classifiers.pop(k, None)
+                logger.info("[evict] classifier %s removed after TTL", k)
+
+    asyncio.create_task(_evict())
+
+
 @app.get("/health")
 async def health():
     return {"status": "ok", "classifiers": len(_classifiers)}
@@ -543,7 +578,7 @@ async def train(
         clf.fit(X, y)
 
         clf_id = str(uuid.uuid4())
-        _classifiers[clf_id] = clf
+        _classifiers[clf_id] = {"clf": clf, "last_used": time.time()}
         return clf_id, clf.n_classes
 
     clf_id, n_classes = await _run_train(_train)
@@ -620,7 +655,7 @@ async def train_multi(
         clf = Classifier()
         clf.fit(X, y)
         clf_id = str(uuid.uuid4())
-        _classifiers[clf_id] = clf
+        _classifiers[clf_id] = {"clf": clf, "last_used": time.time()}
         return clf_id, clf.n_classes
 
     clf_id, n_classes = await _run_train(_train_multi)
@@ -643,9 +678,7 @@ async def predict_tile(
     effective_auth = authorization or (f"Bearer {token}" if token else None)
     _auth(effective_auth)
 
-    clf = _classifiers.get(classifier_id)
-    if clf is None:
-        raise HTTPException(status_code=404, detail="Classifier not found")
+    clf = _get_clf(classifier_id)
 
     parts = tile_spec.split("_")
     if len(parts) != 2:
@@ -691,9 +724,7 @@ async def start_export(
     authorization: Optional[str] = Header(default=None),
 ):
     user = _auth(authorization)
-    clf = _classifiers.get(req.classifier_id)
-    if clf is None:
-        raise HTTPException(status_code=404, detail="Classifier not found")
+    clf = _get_clf(req.classifier_id)
 
     job_id = str(uuid.uuid4())
     _exports[job_id] = {"status": "pending", "progress": 0.0}
@@ -798,9 +829,7 @@ async def start_batch_export(
     with the given classifier, write results to output_dir/{name}.dzip.
     """
     _auth(authorization)
-    clf = _classifiers.get(req.classifier_id)
-    if clf is None:
-        raise HTTPException(status_code=404, detail="Classifier not found")
+    clf = _get_clf(req.classifier_id)
 
     job_id = str(uuid.uuid4())
     _batch_jobs[job_id] = {
@@ -907,7 +936,7 @@ async def headless_run(
         clf_obj = Classifier()
         clf_obj.fit(X, y)
         cid = str(uuid.uuid4())
-        _classifiers[cid] = clf_obj
+        _classifiers[cid] = {"clf": clf_obj, "last_used": time.time()}
         logger.info(
             "[headless] trained classifier %s on %d pixels from %d images",
             cid,
@@ -922,7 +951,7 @@ async def headless_run(
         raise HTTPException(status_code=500, detail=f"Training failed: {e}") from e
 
     # 2 — Batch export
-    clf = _classifiers[cid]
+    clf = _get_clf(cid)
     batch_req = BatchExportRequest(
         classifier_id=cid,
         p_source=req.p_source,
@@ -955,9 +984,7 @@ async def export_zip(
     the viewer or any other DZI-capable tool.
     """
     _auth(authorization)
-    clf = _classifiers.get(req.classifier_id)
-    if clf is None:
-        raise HTTPException(status_code=404, detail="Classifier not found")
+    clf = _get_clf(req.classifier_id)
     logger.info(
         "[export-zip] start: output_url=%s dzip=%s",
         req.output_url or "(download)",
