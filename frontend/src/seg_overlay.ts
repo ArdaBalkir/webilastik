@@ -125,21 +125,25 @@ export class SegmentationOverlay {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     if (!this.visible || !this.dzip || !this.segMeta || !viewer.meta_) return;
 
-    const meta = this.segMeta;
-    const level = this.segLevel;
-    const scale = Math.pow(2, level - meta.maxLevel); // = 1.0 (level === maxLevel)
-    const lw = Math.max(1, Math.ceil(meta.width * scale));
-    const lh = Math.max(1, Math.ceil(meta.height * scale));
-    const ts = meta.tileSize;
+    const segMeta = this.segMeta;
+    const srcMeta = viewer.meta_;
+    const ts = segMeta.tileSize;
+    const lw = segMeta.width;
+    const lh = segMeta.height;
 
-    // Visible full-res region from the source viewer's viewport.
+    // Scale: how many source full-res pixels correspond to one seg pixel.
+    // e.g. if seg is quarter-res (export level = maxLevel-2), segToSrc = 4.
+    const segToSrc = srcMeta.width / segMeta.width;
+
+    // Visible source full-res region.
     const [ix0, iy0] = viewer.canvasToImage(0, 0);
     const [ix1, iy1] = viewer.canvasToImage(canvas.width, canvas.height);
 
-    const colMin = Math.max(0, Math.floor((ix0 * scale) / ts));
-    const colMax = Math.min(Math.ceil(lw / ts) - 1, Math.floor((ix1 * scale) / ts));
-    const rowMin = Math.max(0, Math.floor((iy0 * scale) / ts));
-    const rowMax = Math.min(Math.ceil(lh / ts) - 1, Math.floor((iy1 * scale) / ts));
+    // Convert source coords to seg pixel coords for tile index math.
+    const colMin = Math.max(0, Math.floor(ix0 / (ts * segToSrc)));
+    const colMax = Math.min(Math.ceil(lw / ts) - 1, Math.floor(ix1 / (ts * segToSrc)));
+    const rowMin = Math.max(0, Math.floor(iy0 / (ts * segToSrc)));
+    const rowMax = Math.min(Math.ceil(lh / ts) - 1, Math.floor(iy1 / (ts * segToSrc)));
 
     ctx.save();
     ctx.globalAlpha = this.opacity;
@@ -147,7 +151,7 @@ export class SegmentationOverlay {
 
     for (let row = rowMin; row <= rowMax; row++) {
       for (let col = colMin; col <= colMax; col++) {
-        this.drawTile(col, row, level, scale, lw, lh);
+        this.drawTile(col, row, segToSrc, lw, lh);
       }
     }
 
@@ -157,13 +161,13 @@ export class SegmentationOverlay {
   private drawTile(
     col: number,
     row: number,
-    level: number,
-    scale: number,
+    segToSrc: number,
     lw: number,
     lh: number,
   ) {
     const { ctx, viewer } = this;
     const meta = this.segMeta!;
+    const level = this.segLevel;
     const key = `${level}/${col}_${row}`;
     const cached = this.tileCache.get(key);
 
@@ -174,10 +178,11 @@ export class SegmentationOverlay {
       const topOl  = row === 0 ? 0 : ol;
       const renderW = Math.min(ts, lw - col * ts);
       const renderH = Math.min(ts, lh - row * ts);
-      const imgX = (col * ts) / scale;
-      const imgY = (row * ts) / scale;
-      const imgW = renderW / scale;
-      const imgH = renderH / scale;
+      // Map seg tile top-left to source full-res coords
+      const imgX = col * ts * segToSrc;
+      const imgY = row * ts * segToSrc;
+      const imgW = renderW * segToSrc;
+      const imgH = renderH * segToSrc;
       const [cx, cy] = viewer.imageToCanvas(imgX, imgY);
       ctx.drawImage(
         cached,

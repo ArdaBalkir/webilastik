@@ -111,7 +111,7 @@ export function ViewerApp() {
       {/* ── Toolbar ─────────────────────────────────────────────────── */}
       <div class="viewer-toolbar">
         <span class="app-title" style="padding:0;border:none;margin:0">
-          Webilastik — Viewer
+          Webilastik Overlay Viewer
         </span>
 
         {/* Source picker */}
