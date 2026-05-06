@@ -386,11 +386,14 @@ def build_prediction_dzip(
     workers: int,
     local_path: Optional[pathlib.Path] = None,
     level: Optional[int] = None,
+    dzsave: bool = False,
 ) -> tuple[pathlib.Path, pathlib.Path]:
     """
     Predict all tiles at the requested level (default: max_level = full res),
     write to tmpdir, pack as DZIP.
     If local_path is provided, reads tiles from it (no network) — use after prefetch.
+    If dzsave=True, stitches tiles into a full image and runs libvips dzsave to
+    produce a multi-level DZI pyramid before packing (requires pyvips).
     Returns (tmpdir, dzip_path).  Caller must shutil.rmtree(tmpdir).
     """
     import threading
@@ -530,15 +533,100 @@ def build_prediction_dzip(
     if errors:
         logger.warning("  %d tile errors: %s", len(errors), "; ".join(errors[:5]))
 
-    (tmpdir / f"{out_name}.dzi").write_text(dzi_xml, encoding="utf-8")
     dzip_path = tmpdir / f"{out_name}.dzip"
-    logger.info("  packing %s", dzip_path.name)
-    with zipfile.ZipFile(dzip_path, "w", compression=zipfile.ZIP_STORED) as zf:
-        zf.write(tmpdir / f"{out_name}.dzi", f"{out_name}.dzi")
-        for png_file in sorted(tiles_dir.iterdir()):
-            zf.write(png_file, f"{out_name}_files/{level}/{png_file.name}")
+
+    if dzsave:
+        # ── libvips dzsave path ────────────────────────────────────────────
+        # Stitch predicted tiles → full image → dzsave pyramid → pack DZIP
+        dzsave_prefix = str(tmpdir / out_name)
+        _dzsave_from_tiles(
+            tiles_dir,
+            dzsave_prefix,
+            num_cols,
+            num_rows,
+            lw,
+            lh,
+            ts,
+            ol,
+        )
+        dzsave_dzi = pathlib.Path(f"{dzsave_prefix}.dzi")
+        dzsave_files = pathlib.Path(f"{dzsave_prefix}_files")
+        logger.info("  packing dzsave pyramid → %s", dzip_path.name)
+        with zipfile.ZipFile(dzip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+            zf.write(dzsave_dzi, dzsave_dzi.name)
+            for tile_file in sorted(dzsave_files.rglob("*")):
+                if tile_file.is_file():
+                    zf.write(tile_file, str(tile_file.relative_to(tmpdir)))
+    else:
+        # ── Original single-level pack ─────────────────────────────────────
+        (tmpdir / f"{out_name}.dzi").write_text(dzi_xml, encoding="utf-8")
+        logger.info("  packing %s", dzip_path.name)
+        with zipfile.ZipFile(dzip_path, "w", compression=zipfile.ZIP_STORED) as zf:
+            zf.write(tmpdir / f"{out_name}.dzi", f"{out_name}.dzi")
+            for png_file in sorted(tiles_dir.iterdir()):
+                zf.write(png_file, f"{out_name}_files/{level}/{png_file.name}")
+
     logger.info("  packed %s bytes", f"{dzip_path.stat().st_size:,}")
     return tmpdir, dzip_path
+
+
+# ── libvips dzsave ────────────────────────────────────────────────────────────
+
+
+def _dzsave_from_tiles(
+    tiles_dir: pathlib.Path,
+    out_prefix: str,
+    num_cols: int,
+    num_rows: int,
+    lw: int,
+    lh: int,
+    tile_size: int,
+    overlap: int,
+) -> None:
+    """
+    Stitch single-level prediction tiles (with overlap) into a full image using
+    pyvips, then run dzsave to produce a multi-level DZI pyramid.
+
+    - tiles_dir  : directory containing ``{col}_{row}.png`` files
+    - out_prefix : path prefix (no extension) for dzsave output
+                   → ``{out_prefix}.dzi`` + ``{out_prefix}_files/``
+    - overlap    : DZI border overlap that was included in each source tile
+    """
+    try:
+        import pyvips
+    except ImportError as exc:
+        raise RuntimeError(
+            "pyvips (libvips Python bindings) is required for --dzsave.\n"
+            "Install with: pip install pyvips"
+        ) from exc
+
+    logger.info("  [dzsave] stitching %d×%d tile grid …", num_cols, num_rows)
+    images: list = []
+    for row in range(num_rows):
+        for col in range(num_cols):
+            path = str(tiles_dir / f"{col}_{row}.png")
+            tile = pyvips.Image.new_from_file(path, access="sequential")
+            # Strip the overlap border so tiles sit flush when joined.
+            x0 = overlap if col > 0 else 0
+            y0 = overlap if row > 0 else 0
+            x1 = tile.width - (overlap if col < num_cols - 1 else 0)
+            y1 = tile.height - (overlap if row < num_rows - 1 else 0)
+            tile = tile.crop(x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+            images.append(tile)
+
+    full = pyvips.Image.arrayjoin(images, across=num_cols)
+    # arrayjoin may pad the last row/col — crop to exact image dimensions.
+    full = full.crop(0, 0, min(lw, full.width), min(lh, full.height))
+
+    logger.info("  [dzsave] running dzsave on %d×%d image …", full.width, full.height)
+    full.dzsave(
+        out_prefix,
+        tile_size=tile_size,
+        overlap=overlap,
+        suffix=".png",
+        background=0,
+    )
+    logger.info("  [dzsave] done → %s.dzi", out_prefix)
 
 
 # ── Upload ────────────────────────────────────────────────────────────────────
@@ -569,6 +657,7 @@ def run(
     token: Optional[str],
     workers: int,
     prefetch_dir: Optional[pathlib.Path] = None,
+    dzsave: bool = False,
 ) -> int:
     """Returns exit code."""
     t0 = time.time()
@@ -645,6 +734,7 @@ def run(
                 workers,
                 local_path=local_path,
                 level=export_level,
+                dzsave=dzsave,
             )
             logger.info("  uploading → %s", dest_url)
             upload_dzip(dzip_path, dest_url, token)
@@ -849,6 +939,7 @@ def _cmd_predict(args: argparse.Namespace) -> int:
                 token,
                 args.workers,
                 level=getattr(args, "level", None),
+                dzsave=getattr(args, "dzsave", False),
             )
             upload_dzip(dzip_path, dest_url, token)
             logger.info("  ✓ done")
@@ -900,6 +991,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             if getattr(args, "prefetch_dir", None)
             else None
         ),
+        dzsave=getattr(args, "dzsave", False),
     )
 
 
@@ -979,6 +1071,12 @@ def main(argv: Optional[list[str]] = None) -> None:
         default=None,
         help="DZI level to export at (default: max = full res)",
     )
+    p_pred.add_argument(
+        "--dzsave",
+        action="store_true",
+        default=False,
+        help="Stitch tiles → libvips dzsave → full DZI pyramid DZIP (requires pyvips)",
+    )
 
     # ── run ───────────────────────────────────────────────────────────────────
     p_run = sub.add_parser("run", help="Full pipeline: train + predict + upload")
@@ -1002,6 +1100,12 @@ def main(argv: Optional[list[str]] = None) -> None:
     p_run.add_argument("--level", type=int, default=None)
     _add_token_args(p_run)
     p_run.add_argument("--workers", type=int, default=_DEFAULT_WORKERS)
+    p_run.add_argument(
+        "--dzsave",
+        action="store_true",
+        default=False,
+        help="Stitch tiles → libvips dzsave → full DZI pyramid DZIP (requires pyvips)",
+    )
     p_run.add_argument(
         "--prefetch-dir",
         metavar="DIR",
