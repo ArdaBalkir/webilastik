@@ -97,7 +97,9 @@ export function DataPanel({ onLoad }: Props) {
     try {
       const headers: Record<string, string> = state.bearerToken.value
         ? { Authorization: `Bearer ${state.bearerToken.value}` } : {};
-      const res = await fetch(objectUrl, { headers });
+      const url = new URL(objectUrl);
+      url.searchParams.set("redirect", "false");
+      const res = await fetch(url.toString(), { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const text = await res.text();
       const file = new File([text], "project.json", { type: "application/json" });
