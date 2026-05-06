@@ -157,6 +157,57 @@ export function switchTrainingSource(objectUrl: string) {
   strokes.value = strokesBySource.value[objectUrl] ?? [];
 }
 
+// ── Saved classifier models (persisted to localStorage) ───────────────────
+// Users can name and save a classifier_id so it survives page reload.
+// On load they can pick a saved model, enter it as the active classifierId,
+// and predictions appear immediately without re-training.
+
+export interface SavedModel {
+  id: string;           // classifier_id from the server
+  name: string;         // user-supplied label
+  savedAt: number;      // Date.now()
+  dziUrl?: string;      // which image it was trained on (for reference)
+  numClasses?: number;
+}
+
+const _MODEL_STORE_KEY = "wi2_saved_models";
+
+function _loadSavedModels(): SavedModel[] {
+  try { return JSON.parse(localStorage.getItem(_MODEL_STORE_KEY) ?? "[]"); }
+  catch { return []; }
+}
+
+export const savedModels = signal<SavedModel[]>(_loadSavedModels());
+
+export function saveCurrentModel(name: string): void {
+  const id = classifierId.value;
+  if (!id) return;
+  const rec: SavedModel = {
+    id,
+    name,
+    savedAt: Date.now(),
+    dziUrl: dziUrl.value || undefined,
+    numClasses: numClasses.value || undefined,
+  };
+  const next = [rec, ...savedModels.value.filter((m) => m.id !== id)].slice(0, 20);
+  savedModels.value = next;
+  localStorage.setItem(_MODEL_STORE_KEY, JSON.stringify(next));
+}
+
+export function deleteSavedModel(id: string): void {
+  const next = savedModels.value.filter((m) => m.id !== id);
+  savedModels.value = next;
+  localStorage.setItem(_MODEL_STORE_KEY, JSON.stringify(next));
+}
+
+/** Restore a saved model as the active classifier (no re-training needed). */
+export function restoreModel(model: SavedModel): void {
+  classifierId.value   = model.id;
+  numClasses.value     = model.numClasses ?? 0;
+  trainingStatus.value = "ready";
+  predictionVisible.value = true;
+}
+
 // ── HPC job history (persisted to localStorage) ───────────────────────────
 const _JOB_HISTORY_KEY = "wi2_hpc_jobs";
 

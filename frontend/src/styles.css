@@ -1065,3 +1065,112 @@ select {
   background: #3dd6c0;
   box-shadow: 0 0 4px #3dd6c0;
 }
+
+/* ── Viewer mode (mode=viewer) ─────────────────────────────────────────── */
+.viewer-toolbar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 6px 12px;
+  background: rgba(18, 18, 18, 0.92);
+  backdrop-filter: blur(4px);
+  border-bottom: 1px solid #2a2a2a;
+  flex-wrap: wrap;
+}
+
+.viewer-toolbar-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.viewer-toolbar-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: #666;
+  white-space: nowrap;
+}
+
+.viewer-toolbar-check {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #ccc;
+  cursor: pointer;
+}
+
+.viewer-select {
+  background: #1e1e1e;
+  border: 1px solid #333;
+  border-radius: 3px;
+  color: #ddd;
+  font-size: 12px;
+  padding: 3px 6px;
+  max-width: 280px;
+}
+.viewer-select:focus { outline: 1px solid #3dd6c0; }
+
+/* Viewer canvas fills entire window; toolbar floats over it */
+.viewer-area-full {
+  position: fixed;
+  inset: 0;
+  top: 0;   /* toolbar overlay — canvas goes full screen, toolbar is above */
+}
+
+/* ── Saved models list ───────────────────────────────────────────────────── */
+.saved-model-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.saved-model-item {
+  padding: 6px 8px;
+  background: #1a1a1a;
+  border: 1px solid #2a2a2a;
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.saved-model-name {
+  font-size: 12px;
+  color: #ddd;
+  font-weight: 600;
+}
+
+.saved-model-meta {
+  font-size: 10px;
+}
+
+.btn-danger {
+  background: #3a1515;
+  border-color: #7a2020;
+  color: #ff8888;
+}
+.btn-danger:hover {
+  background: #5a1515;
+  border-color: #aa3030;
+}
+
+.input-sm {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 3px;
+  color: #ddd;
+  font-size: 12px;
+  padding: 3px 6px;
+}
+.input-sm:focus { outline: 1px solid #3dd6c0; }
