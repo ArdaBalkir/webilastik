@@ -101,7 +101,12 @@ export function DataPanel({ onLoad }: Props) {
       url.searchParams.set("redirect", "false");
       const res = await fetch(url.toString(), { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const text = await res.text();
+      const json = await res.json();
+      // data-proxy returns {"url": "<presigned-s3-url>"} — follow it without auth
+      const downloadUrl: string = json?.url ?? objectUrl;
+      const dlRes = await fetch(downloadUrl);
+      if (!dlRes.ok) throw new Error(`Download HTTP ${dlRes.status}`);
+      const text = await dlRes.text();
       const file = new File([text], "project.json", { type: "application/json" });
       await loadProject(file);
       onLoad(state.dziUrl.value);
