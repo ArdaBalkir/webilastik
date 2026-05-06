@@ -49,8 +49,6 @@ export SRUN_CPUS_PER_TASK=${SLURM_CPUS_PER_TASK}
 #       --prefetch-dir ${PREFETCH_DIR}
 #   # (it will fail at upload — that's fine, the cache is what we need)
 
-# Add --dzsave to produce a full multi-level DZI pyramid instead of single-level
-# (requires pyvips: conda install -c conda-forge pyvips)
 srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --overlap -u \
     python -m backend.headless_cli run \
         --annotations "${ANNOTATIONS}" \
@@ -58,5 +56,4 @@ srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --overlap -u \
         --output-dir  "${OUTPUT_DIR}" \
         --token-env   WI2_TOKEN \
         --workers     ${SLURM_CPUS_PER_TASK} \
-        --prefetch-dir "${PREFETCH_DIR}" \
-        --dzsave
+        --prefetch-dir "${PREFETCH_DIR}"

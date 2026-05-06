@@ -28,8 +28,4 @@ PyJWT[crypto]>=2.8.0
 # ── CPU classifier fallback ───────────────────────────────────────────────────
 scikit-learn>=1.4.2
 
-# ── Multi-level DZI pyramid output (optional, --dzsave flag) ─────────────────
-# libvips Python bindings.  The C library is bundled by conda-forge, so install
-# with conda, not pip, on HPC systems:
-#   conda install -c conda-forge pyvips
-# pyvips
+
