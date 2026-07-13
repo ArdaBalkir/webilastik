@@ -52,6 +52,9 @@ export function App() {
     brush.onStrokeFinished = (stroke) => {
       state.strokes.value = [...state.strokes.value, stroke];
     };
+    brush.onStrokesErased = (strokes) => {
+      state.strokes.value = strokes;
+    };
 
     // Auto-load t_source DZIP if it was set via URL param
     const initialUrl = state.dziUrl.value;
@@ -80,12 +83,13 @@ export function App() {
   // Keep brush mode in sync with state.toolMode
   useEffect(() => {
     const unsub = state.toolMode.subscribe((mode: string) => {
-      brushRef.current?.setEnabled(mode === "brush");
+      brushRef.current?.setEnabled(mode === "brush" || mode === "erase");
+      brushRef.current?.setMode(mode === "erase" ? "erase" : "brush");
       if (viewerRef.current) {
         viewerRef.current.canvas.style.pointerEvents =
-          mode === "brush" ? "none" : "auto";
+          mode === "brush" || mode === "erase" ? "none" : "auto";
         viewerRef.current.canvas.style.cursor =
-          mode === "brush" ? "default" : "grab";
+          mode === "brush" || mode === "erase" ? "default" : "grab";
       }
     });
     return unsub;
@@ -281,8 +285,32 @@ export function App() {
       alert("Set ?workdir= in the URL to enable HPC export.");
       return;
     }
-    const strokes = state.strokes.value;
-    if (strokes.length === 0) { alert("No annotations — paint strokes first."); return; }
+
+    // Collect strokes from ALL annotated images (current + saved per-source),
+    // same as handleTrain, so switching between images doesn't drop earlier
+    // annotations from the exported job.
+    const allBySource: Record<string, import("./types").Stroke[]> = {
+      ...state.strokesBySource.value,
+    };
+    if (state.dziUrl.value) {
+      allBySource[state.dziUrl.value] = state.strokes.value;
+    }
+    const wl = state.workLevel.value ?? state.dziMeta.value?.maxLevel ?? 0;
+    const annotations = Object.entries(allBySource)
+      .filter(([, ss]) => ss.length > 0)
+      .map(([dzip_url, ss]) => ({
+        dzip_url,
+        level: wl,
+        strokes: ss.map((s) => {
+          const f = Math.pow(2, wl - s.level);
+          return {
+            label: s.labelId,
+            points: s.points.map(([x, y]) => [Math.round(x * f), Math.round(y * f)] as [number, number]),
+          };
+        }),
+      }));
+
+    if (annotations.length === 0) { alert("No annotations — paint strokes first."); return; }
 
     const fc = state.featureConfig.value;
     state.exportStatus.value = "submitting";
@@ -291,18 +319,7 @@ export function App() {
         state.allocatorUrl.value, state.bearerToken.value,
       );
       const res = await client.submitHeadlessJob({
-        annotations: [{
-          dzip_url: state.dziUrl.value,
-          level: state.workLevel.value ?? state.dziMeta.value?.maxLevel,
-          strokes: strokes.map((s) => {
-            const wl = state.workLevel.value ?? state.dziMeta.value?.maxLevel ?? s.level;
-            const f = Math.pow(2, wl - s.level);
-            return {
-              label: s.labelId,
-              points: s.points.map(([x, y]) => [Math.round(x * f), Math.round(y * f)] as [number, number]),
-            };
-          }),
-        }],
+        annotations,
         features: { filters: featureConfigToFilters(fc), scales: fc.scales },
         p_source: srcDir,
         output_dir: outDir,
@@ -311,7 +328,7 @@ export function App() {
         job_id: res.job_id, slurm_job_id: res.slurm_job_id,
         slurm_state: res.slurm_state, status: res.status,
         p_source: res.p_source, output_dir: res.output_dir, log_path: res.log_path,
-        created_at: Date.now(), annotated_images: 1,
+        created_at: Date.now(), annotated_images: annotations.length,
       };
       state.addHpcJob(record);
       state.activeHpcJob.value = record;

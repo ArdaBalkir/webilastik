@@ -36,7 +36,7 @@ export const activeLabelId = signal<number>(1);
 export const strokes = signal<Stroke[]>([]);
 
 // Tool mode
-export const toolMode = signal<"pan" | "brush">("pan");
+export const toolMode = signal<"pan" | "brush" | "erase">("pan");
 export const brushSize = signal<number>(3);
 
 // Features

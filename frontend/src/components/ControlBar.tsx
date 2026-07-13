@@ -1,7 +1,7 @@
 import { h } from "preact";
 import { useSignal } from "@preact/signals";
 import * as state from "../state";
-import { Hand, Paintbrush } from "lucide-preact";
+import { Hand, Paintbrush, Eraser } from "lucide-preact";
 import { LabelPanel } from "./LabelPanel";
 import { AnnotationPanel } from "./AnnotationPanel";
 
@@ -40,11 +40,18 @@ export function ControlBar({ onTrain, onExport }: Props) {
         >
           <Paintbrush size={14} /> Brush
         </button>
+        <button
+          class={`btn-tool ${tool === "erase" ? "active" : ""}`}
+          onClick={() => (state.toolMode.value = "erase")}
+          title="Eraser — click/drag over strokes to remove them"
+        >
+          <Eraser size={14} /> Erase
+        </button>
       </div>
 
-      {tool === "brush" && (
+      {(tool === "brush" || tool === "erase") && (
         <label class="row">
-          Brush radius:
+          {tool === "erase" ? "Eraser radius:" : "Brush radius:"}
           <input
             type="range"
             min={1}

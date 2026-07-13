@@ -26,9 +26,12 @@ export class BrushingCanvas {
   private brushSize = 3; // radius in full-res image pixels
   private enabled = false;
   private highlightedIdx: number | null = null;
+  private mode: "brush" | "erase" = "brush";
 
   // Callbacks
   onStrokeFinished?: (stroke: Stroke) => void;
+  /** Fired after strokes have been removed by the eraser, with the updated list. */
+  onStrokesErased?: (strokes: Stroke[]) => void;
 
   constructor(container: HTMLElement, viewer: DziViewer) {
     this.viewer = viewer;
@@ -54,9 +57,18 @@ export class BrushingCanvas {
   setEnabled(enabled: boolean) {
     this.enabled = enabled;
     this.canvas.style.pointerEvents = enabled ? "auto" : "none";
-    this.canvas.style.cursor = enabled ? "crosshair" : "default";
+    this.canvas.style.cursor = enabled
+      ? this.mode === "erase" ? "cell" : "crosshair"
+      : "default";
     if (!enabled) this.detachMouseEvents();
     else this.attachMouseEvents();
+  }
+
+  setMode(mode: "brush" | "erase") {
+    this.mode = mode;
+    if (this.enabled) {
+      this.canvas.style.cursor = mode === "erase" ? "cell" : "crosshair";
+    }
   }
 
   setBrushSize(radiusPx: number) {
@@ -193,6 +205,11 @@ export class BrushingCanvas {
     if (e.button !== 0) return;
     e.stopPropagation();
 
+    if (this.mode === "erase") {
+      this.startErasing(e);
+      return;
+    }
+
     const rect = this.canvas.getBoundingClientRect();
     const meta = this.viewer.meta_;
     const level = meta?.maxLevel ?? 0;
@@ -248,6 +265,50 @@ export class BrushingCanvas {
     document.addEventListener("mousemove", this.mouseMoveHandler);
     document.addEventListener("mouseup", this.mouseUpHandler);
   };
+
+  /** Erase mode: removes any stroke whose points fall within the brush radius. */
+  private startErasing(e: MouseEvent) {
+    const rect = this.canvas.getBoundingClientRect();
+    const meta = this.viewer.meta_;
+
+    const eraseAt = (clientX: number, clientY: number) => {
+      if (!meta) return;
+      const cx = clientX - rect.left;
+      const cy = clientY - rect.top;
+      const [ix, iy] = this.viewer.canvasToImage(cx, cy);
+      const radius = this.brushSize;
+
+      const before = this.strokes.length;
+      this.strokes = this.strokes.filter((stroke) => {
+        const scale = Math.pow(2, stroke.level - meta.maxLevel);
+        const hit = stroke.points.some(([px, py]) => {
+          const fx = px / scale;
+          const fy = py / scale;
+          return Math.hypot(fx - ix, fy - iy) <= radius;
+        });
+        return !hit;
+      });
+      if (this.strokes.length !== before) {
+        if (this.highlightedIdx !== null && this.highlightedIdx >= this.strokes.length) {
+          this.highlightedIdx = null;
+        }
+        this.redraw();
+        this.onStrokesErased?.(this.strokes);
+      }
+    };
+
+    eraseAt(e.clientX, e.clientY);
+
+    this.mouseMoveHandler = (ev: MouseEvent) => eraseAt(ev.clientX, ev.clientY);
+    this.mouseUpHandler = () => {
+      document.removeEventListener("mousemove", this.mouseMoveHandler!);
+      document.removeEventListener("mouseup", this.mouseUpHandler!);
+      this.mouseMoveHandler = null;
+      this.mouseUpHandler = null;
+    };
+    document.addEventListener("mousemove", this.mouseMoveHandler);
+    document.addEventListener("mouseup", this.mouseUpHandler);
+  }
 }
 
 // ── Prediction overlay ───────────────────────────────────────────────────────
