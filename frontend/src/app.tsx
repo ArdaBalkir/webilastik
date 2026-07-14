@@ -267,6 +267,7 @@ export function App() {
     try {
       const client = new ApiClient(state.serverUrl.value, state.bearerToken.value);
       const res = await client.trainMulti(req);
+      state.discardSupersededSavedModels(res.classifier_id);
       state.classifierId.value = res.classifier_id;
       state.numClasses.value = res.num_classes;
       state.trainedLevel.value = level;

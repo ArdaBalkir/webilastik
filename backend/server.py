@@ -32,6 +32,7 @@ import os
 import pathlib
 import shutil
 import tempfile
+import threading
 import uuid
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
@@ -45,7 +46,7 @@ from fastapi.staticfiles import StaticFiles
 from PIL import Image
 from pydantic import BaseModel
 
-from .auth import verify_token, AuthError
+from .auth import verify_token, AuthError, get_user_id
 from .classifier import Classifier
 from .encoding import encode_prediction_png
 from .dzi_source import DzipSource
@@ -115,23 +116,55 @@ async def _run(fn, *args):
 
 
 # ── In-memory state ───────────────────────────────────────────────────────────
-# classifier_id → {"clf": Classifier, "last_used": float}
+# Each authenticated user owns at most one classifier.  A successful retrain
+# installs a fresh classifier ID (which invalidates cached prediction tiles)
+# and removes that user's previous classifier immediately.
+# classifier_id → {"clf": Classifier, "last_used": float, "user_id": str}
 _CLF_TTL = 30 * 60  # 30 minutes
-_classifiers: Dict[str, Dict] = {}
+_classifiers: Dict[str, Dict[str, Any]] = {}
+_user_classifier_ids: Dict[str, str] = {}
+_classifier_lock = threading.Lock()
 import time
 
 
-def _get_clf(classifier_id: str) -> "Classifier":
-    """Look up a classifier by ID, touch its last_used timestamp, or raise 404."""
-    entry = _classifiers.get(classifier_id)
-    if entry is None:
-        from fastapi import HTTPException
+def _store_clf(user_id: str, clf: "Classifier") -> str:
+    """Atomically replace a user's classifier and return its new cache-safe ID."""
+    classifier_id = str(uuid.uuid4())
+    now = time.time()
+    with _classifier_lock:
+        previous_id = _user_classifier_ids.get(user_id)
+        if previous_id is not None:
+            _classifiers.pop(previous_id, None)
+        _classifiers[classifier_id] = {
+            "clf": clf,
+            "last_used": now,
+            "user_id": user_id,
+        }
+        _user_classifier_ids[user_id] = classifier_id
 
-        raise HTTPException(
-            status_code=404, detail="Classifier not found (may have expired)"
+    if previous_id is not None:
+        logger.info(
+            "[classifier] user %s replaced model %s with %s",
+            user_id,
+            previous_id,
+            classifier_id,
         )
-    entry["last_used"] = time.time()
-    return entry["clf"]
+    else:
+        logger.info("[classifier] user %s stored model %s", user_id, classifier_id)
+    return classifier_id
+
+
+def _get_clf(classifier_id: str, user_id: str) -> "Classifier":
+    """Return the user's current classifier, touch its TTL, or raise 404."""
+    with _classifier_lock:
+        entry = _classifiers.get(classifier_id)
+        if entry is None or entry["user_id"] != user_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Classifier not found (may have been replaced or expired)",
+            )
+        entry["last_used"] = time.time()
+        return entry["clf"]
 
 
 # (dzip_url, token) → DzipSource (reuse HTTP sessions per token)
@@ -335,7 +368,10 @@ def _auth(authorization: Optional[str]) -> Dict[str, Any]:
     if os.environ.get("DISABLE_AUTH") == "1":
         return {"sub": "dev-user"}
     try:
-        return verify_token(authorization)
+        payload = verify_token(authorization)
+        # A stable subject is required to enforce one classifier per user.
+        get_user_id(payload)
+        return payload
     except AuthError as e:
         raise HTTPException(status_code=401, detail=str(e)) from e
 
@@ -446,13 +482,18 @@ async def _start_eviction_loop():
         while True:
             await asyncio.sleep(60)
             now = time.time()
-            expired = [
-                k
-                for k, v in list(_classifiers.items())
-                if now - v["last_used"] > _CLF_TTL
-            ]
+            with _classifier_lock:
+                expired = [
+                    k
+                    for k, v in _classifiers.items()
+                    if now - v["last_used"] > _CLF_TTL
+                ]
+                for k in expired:
+                    entry = _classifiers.pop(k)
+                    user_id = entry["user_id"]
+                    if _user_classifier_ids.get(user_id) == k:
+                        _user_classifier_ids.pop(user_id, None)
             for k in expired:
-                _classifiers.pop(k, None)
                 logger.info("[evict] classifier %s removed after TTL", k)
 
     asyncio.create_task(_evict())
@@ -460,7 +501,9 @@ async def _start_eviction_loop():
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "classifiers": len(_classifiers)}
+    with _classifier_lock:
+        classifier_count = len(_classifiers)
+    return {"status": "ok", "classifiers": classifier_count}
 
 
 @app.post("/save-project")
@@ -522,7 +565,8 @@ async def train(
     authorization: Optional[str] = Header(default=None),
 ):
     user = _auth(authorization)
-    logger.info("Train request from %s: %d strokes", user.get("sub"), len(req.strokes))
+    user_id = get_user_id(user)
+    logger.info("Train request from %s: %d strokes", user_id, len(req.strokes))
 
     def _train() -> tuple[str, int]:
         dzip = _get_dzip(req.dzip_url, authorization)
@@ -577,8 +621,7 @@ async def train(
         clf = Classifier()
         clf.fit(X, y)
 
-        clf_id = str(uuid.uuid4())
-        _classifiers[clf_id] = {"clf": clf, "last_used": time.time()}
+        clf_id = _store_clf(user_id, clf)
         return clf_id, clf.n_classes
 
     clf_id, n_classes = await _run_train(_train)
@@ -592,10 +635,11 @@ async def train_multi(
 ):
     """Train a classifier from annotations across multiple images."""
     user = _auth(authorization)
+    user_id = get_user_id(user)
     total_strokes = sum(len(a.strokes) for a in req.annotations)
     logger.info(
         "TrainMulti from %s: %d images, %d strokes total",
-        user.get("sub"),
+        user_id,
         len(req.annotations),
         total_strokes,
     )
@@ -654,8 +698,7 @@ async def train_multi(
         logger.info("TrainMulti RF on %d samples, %d features", *X.shape)
         clf = Classifier()
         clf.fit(X, y)
-        clf_id = str(uuid.uuid4())
-        _classifiers[clf_id] = {"clf": clf, "last_used": time.time()}
+        clf_id = _store_clf(user_id, clf)
         return clf_id, clf.n_classes
 
     clf_id, n_classes = await _run_train(_train_multi)
@@ -676,9 +719,8 @@ async def predict_tile(
 ):
     # Accept token via query param (img.src can't send headers)
     effective_auth = authorization or (f"Bearer {token}" if token else None)
-    _auth(effective_auth)
-
-    clf = _get_clf(classifier_id)
+    user = _auth(effective_auth)
+    clf = _get_clf(classifier_id, get_user_id(user))
 
     parts = tile_spec.split("_")
     if len(parts) != 2:
@@ -724,7 +766,7 @@ async def start_export(
     authorization: Optional[str] = Header(default=None),
 ):
     user = _auth(authorization)
-    clf = _get_clf(req.classifier_id)
+    clf = _get_clf(req.classifier_id, get_user_id(user))
 
     job_id = str(uuid.uuid4())
     _exports[job_id] = {"status": "pending", "progress": 0.0}
@@ -828,8 +870,8 @@ async def start_batch_export(
     Queue a batch export job: list all DZIPs in p_source, predict each one
     with the given classifier, write results to output_dir/{name}.dzip.
     """
-    _auth(authorization)
-    clf = _get_clf(req.classifier_id)
+    user = _auth(authorization)
+    clf = _get_clf(req.classifier_id, get_user_id(user))
 
     job_id = str(uuid.uuid4())
     _batch_jobs[job_id] = {
@@ -874,7 +916,8 @@ async def headless_run(
     then batch-export all DZIPs in *p_source* to *output_dir*.
     Returns immediately with {train_classifier_id, batch_job_id}.
     """
-    _auth(authorization)
+    user = _auth(authorization)
+    user_id = get_user_id(user)
     logger.info(
         "[headless] building train request from %d annotation entries",
         len(req.annotations),
@@ -935,8 +978,7 @@ async def headless_run(
         y = np.array(combined_y, dtype=int)
         clf_obj = Classifier()
         clf_obj.fit(X, y)
-        cid = str(uuid.uuid4())
-        _classifiers[cid] = {"clf": clf_obj, "last_used": time.time()}
+        cid = _store_clf(user_id, clf_obj)
         logger.info(
             "[headless] trained classifier %s on %d pixels from %d images",
             cid,
@@ -951,7 +993,7 @@ async def headless_run(
         raise HTTPException(status_code=500, detail=f"Training failed: {e}") from e
 
     # 2 — Batch export
-    clf = _get_clf(cid)
+    clf = _get_clf(cid, user_id)
     batch_req = BatchExportRequest(
         classifier_id=cid,
         p_source=req.p_source,
@@ -983,8 +1025,8 @@ async def export_zip(
     in the standard DZI tile layout).  The output can be opened directly in
     the viewer or any other DZI-capable tool.
     """
-    _auth(authorization)
-    clf = _get_clf(req.classifier_id)
+    user = _auth(authorization)
+    clf = _get_clf(req.classifier_id, get_user_id(user))
     logger.info(
         "[export-zip] start: output_url=%s dzip=%s",
         req.output_url or "(download)",

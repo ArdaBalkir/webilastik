@@ -158,9 +158,8 @@ export function switchTrainingSource(objectUrl: string) {
 }
 
 // ── Saved classifier models (persisted to localStorage) ───────────────────
-// Users can name and save a classifier_id so it survives page reload.
-// On load they can pick a saved model, enter it as the active classifierId,
-// and predictions appear immediately without re-training.
+// The server keeps one classifier per user. A successful retrain invalidates
+// any previously saved classifier ID.
 
 export interface SavedModel {
   id: string;           // classifier_id from the server
@@ -189,7 +188,15 @@ export function saveCurrentModel(name: string): void {
     dziUrl: dziUrl.value || undefined,
     numClasses: numClasses.value || undefined,
   };
-  const next = [rec, ...savedModels.value.filter((m) => m.id !== id)].slice(0, 20);
+  const next = [rec];
+  savedModels.value = next;
+  localStorage.setItem(_MODEL_STORE_KEY, JSON.stringify(next));
+}
+
+/** Remove local references to models replaced by a successful retrain. */
+export function discardSupersededSavedModels(activeId: string): void {
+  const next = savedModels.value.filter((model) => model.id === activeId);
+  if (next.length === savedModels.value.length) return;
   savedModels.value = next;
   localStorage.setItem(_MODEL_STORE_KEY, JSON.stringify(next));
 }
