@@ -68,16 +68,24 @@ export function App() {
     };
   }, []);
 
-  // Keep viewer tile level capped to chosen working resolution
+  // Keep viewer tile level capped to chosen working resolution. Loading an
+  // image can change this derived level because its max DZI level differs;
+  // that must not discard the classifier selected for the session.
   useEffect(() => {
-    return state.workLevel.subscribe((level: number | null) => {
+    const unsubscribeWorkLevel = state.workLevel.subscribe((level: number | null) => {
       viewerRef.current?.setWorkLevel(level);
-      // Resolution changed — trained classifier is now stale, clear overlay
+    });
+    const unsubscribeResolution = state.workLevelOffset.subscribe(() => {
+      // A user-selected resolution change makes the trained classifier stale.
       state.classifierId.value = null;
       state.trainedLevel.value = null;
       predRef.current?.setLockedLevel(null);
       predRef.current?.clearCache();
     });
+    return () => {
+      unsubscribeWorkLevel();
+      unsubscribeResolution();
+    };
   }, []);
 
   // Keep brush mode in sync with state.toolMode
