@@ -22,6 +22,10 @@ export class DziViewer {
   private blobUrls = new Map<string, string>(); // kept to revoke on destroy
   private dirty = false;
   private rafId = 0;
+  private hasAnimatedLoadingTiles = false;
+  private prefersReducedMotion = window.matchMedia(
+    "(prefers-reduced-motion: reduce)",
+  ).matches;
 
   // Pan gesture
   private isPanning = false;
@@ -148,6 +152,7 @@ export class DziViewer {
 
   private render() {
     const { ctx, canvas, meta, dzip } = this;
+    this.hasAnimatedLoadingTiles = false;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.fillStyle = "#000000";
     ctx.fillRect(0, 0, canvas.width, canvas.height);
@@ -184,6 +189,9 @@ export class DziViewer {
         this.drawTile(level, col, row, scale, lw, lh);
       }
     }
+
+    // Keep the canvas ticking only while a visible shimmer is in progress.
+    if (this.hasAnimatedLoadingTiles) this.dirty = true;
   }
 
   private drawTile(
@@ -199,25 +207,22 @@ export class DziViewer {
     const key = `${level}/${col}_${row}`;
     const cached = this.tileCache.get(key);
 
+    const ts = meta.tileSize;
+    const tlx = col * ts;
+    const tly = row * ts;
+    const renderW = Math.min(ts, lw - tlx);
+    const renderH = Math.min(ts, lh - tly);
+    const imgX = tlx / scale;
+    const imgY = tly / scale;
+    const [cx, cy] = this.imageToCanvas(imgX, imgY);
+    const canvasW = (renderW / scale) * this.zoom;
+    const canvasH = (renderH / scale) * this.zoom;
+
     if (cached instanceof HTMLImageElement) {
-      const ts = meta.tileSize;
       const ol = meta.overlap;
-      // Top-left of this tile in level coords (before overlap)
-      const tlx = col * ts;
-      const tly = row * ts;
       // How many overlap pixels are actually present on left/top edges
       const leftOl = col === 0 ? 0 : ol;
       const topOl = row === 0 ? 0 : ol;
-      // Rendered region width/height in level pixels
-      const renderW = Math.min(ts, lw - tlx);
-      const renderH = Math.min(ts, lh - tly);
-      // Full-res image position for the non-overlap top-left corner
-      const imgX = tlx / scale;
-      const imgY = tly / scale;
-      const imgW = renderW / scale;
-      const imgH = renderH / scale;
-
-      const [cx, cy] = this.imageToCanvas(imgX, imgY);
       ctx.drawImage(
         cached,
         leftOl,
@@ -226,16 +231,21 @@ export class DziViewer {
         renderH,
         cx,
         cy,
-        imgW * this.zoom,
-        imgH * this.zoom,
+        canvasW,
+        canvasH,
       );
       return;
     }
 
-    if (cached === "loading" || cached === "error") return;
+    if (cached === "loading") {
+      this.drawLoadingTile(cx, cy, canvasW, canvasH);
+      return;
+    }
+    if (cached === "error") return;
 
     // Kick off async load
     this.tileCache.set(key, "loading");
+    this.drawLoadingTile(cx, cy, canvasW, canvasH);
     const path = `${this.dziName}_files/${level}/${col}_${row}.${meta.format}`;
     const entry = this.dzip?.entries.get(path);
     if (!entry) {
@@ -259,6 +269,34 @@ export class DziViewer {
         img.src = blobUrl;
       })
       .catch(() => this.tileCache.set(key, "error"));
+  }
+
+  /** Draw a quiet skeleton in exactly the space occupied by a pending tile. */
+  private drawLoadingTile(x: number, y: number, width: number, height: number) {
+    const { ctx, canvas } = this;
+
+    ctx.fillStyle = "#121817";
+    ctx.fillRect(x, y, width, height);
+
+    if (this.prefersReducedMotion) return;
+    this.hasAnimatedLoadingTiles = true;
+
+    // One shared sweep across the viewport keeps adjacent tiles feeling like
+    // a single image placeholder rather than a flickering checkerboard.
+    const phase = (performance.now() % 1500) / 1500;
+    const bandCenter = -canvas.width * 0.25 + phase * canvas.width * 1.5;
+    const bandWidth = Math.max(90, Math.min(220, canvas.width * 0.16));
+    const shimmer = ctx.createLinearGradient(
+      bandCenter - bandWidth,
+      0,
+      bandCenter + bandWidth,
+      0,
+    );
+    shimmer.addColorStop(0, "rgba(61, 214, 192, 0)");
+    shimmer.addColorStop(0.5, "rgba(61, 214, 192, 0.14)");
+    shimmer.addColorStop(1, "rgba(61, 214, 192, 0)");
+    ctx.fillStyle = shimmer;
+    ctx.fillRect(x, y, width, height);
   }
 
   /** Choose the DZI level that most closely matches the current zoom. */
