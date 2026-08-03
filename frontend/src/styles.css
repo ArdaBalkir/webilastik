@@ -45,6 +45,12 @@ body {
   gap: 4px;
 }
 
+/* Let the sidebar scroll instead of shrinking and clipping panel headers. */
+.sidebar-scroll > .panel {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
 .sidebar-footer {
   flex-shrink: 0;
   padding: 8px 10px;
@@ -272,40 +278,51 @@ input[type="checkbox"] { accent-color: #3dd6c0; }
 .label-list { list-style: none; display: flex; flex-direction: column; gap: 4px; }
 
 .label-item {
+  width: 100%;
+  min-height: 38px;
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 4px 6px;
-  border-radius: 4px;
+  gap: 9px;
+  padding: 7px 9px;
+  border-radius: 5px;
   cursor: pointer;
   border: 1px solid transparent;
+  background: #292929;
+  color: #ddd;
+  font: inherit;
+  text-align: left;
 }
-.label-item:hover { background: #303030; }
+.label-item:hover { background: #333; }
+.label-item:focus-visible {
+  outline: 2px solid #3dd6c0;
+  outline-offset: 1px;
+}
 .label-item.active {
   background: #0d2e2b;
   border-color: #3dd6c0;
 }
 
-.color-swatch {
-  width: 22px; height: 22px;
-  border: none;
-  border-radius: 3px;
-  cursor: pointer;
-  padding: 0;
-  background: none;
+.label-color {
+  flex: 0 0 16px;
+  width: 16px;
+  height: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.35);
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.2);
 }
 
-.label-name {
+.label-text {
   flex: 1;
-  background: transparent;
-  border: none;
-  color: #ddd;
   font-size: 12px;
+  font-weight: 600;
   min-width: 0;
 }
-.label-name:focus {
-  outline: 1px solid #3dd6c0;
-  border-radius: 2px;
+
+.label-active-indicator {
+  color: #65dfcd;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
 }
 
 /* ── Features ────────────────────────────────────────────────────────────── */

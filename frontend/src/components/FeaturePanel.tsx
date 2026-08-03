@@ -38,7 +38,10 @@ export function FeaturePanel() {
   return (
     <section class="panel collapsible">
       <button
+        type="button"
         class="collapsible-header"
+        aria-expanded={open.value}
+        aria-controls="feature-panel-body"
         onClick={() => (open.value = !open.value)}
       >
         <span>Features</span>
@@ -49,7 +52,7 @@ export function FeaturePanel() {
       </button>
 
       {open.value && (
-        <div class="collapsible-body">
+        <div id="feature-panel-body" class="collapsible-body">
           <div class="feature-filters">
             {(Object.keys(FILTER_LABELS) as Array<keyof typeof FILTER_LABELS>).map(
               (k) => (
