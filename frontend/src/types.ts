@@ -96,6 +96,9 @@ export interface TrainMultiRequest {
 export interface TrainResponse {
   classifier_id: string;
   num_classes: number;
+  /** Additive router metadata; older compute servers may omit these fields. */
+  generation?: number;
+  worker_id?: string;
 }
 
 export interface ExportRequest {

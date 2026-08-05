@@ -14,6 +14,17 @@ import type {
   BatchExportStatus,
 } from "./types";
 
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly retryAfterSeconds?: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
 export class ApiClient {
   constructor(
     private readonly baseUrl: string,
@@ -24,9 +35,10 @@ export class ApiClient {
     this.token = token;
   }
 
-  private headers(): HeadersInit {
+  private headers(extra?: Record<string, string>): HeadersInit {
     const h: Record<string, string> = { "Content-Type": "application/json" };
     if (this.token) h["Authorization"] = `Bearer ${this.token}`;
+    if (extra) Object.assign(h, extra);
     return h;
   }
 
@@ -35,6 +47,7 @@ export class ApiClient {
     path: string,
     body?: unknown,
     params?: Record<string, string>,
+    extraHeaders?: Record<string, string>,
   ): Promise<T> {
     const url = new URL(path, this.baseUrl);
     if (params) {
@@ -42,12 +55,17 @@ export class ApiClient {
     }
     const res = await fetch(url.toString(), {
       method,
-      headers: this.headers(),
+      headers: this.headers(extraHeaders),
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     if (!res.ok) {
       const text = await res.text().catch(() => res.statusText);
-      throw new Error(`${method} ${path} → ${res.status}: ${text}`);
+      const retryAfter = Number(res.headers.get("Retry-After"));
+      throw new ApiError(
+        `${method} ${path} → ${res.status}: ${text}`,
+        res.status,
+        Number.isFinite(retryAfter) ? retryAfter : undefined,
+      );
     }
     return res.json() as Promise<T>;
   }
@@ -60,13 +78,28 @@ export class ApiClient {
   }
 
   /** Send annotations + feature config to train a GPU/CPU Random Forest. */
-  async train(req: TrainRequest): Promise<TrainResponse> {
-    return this.request<TrainResponse>("POST", "/train", req);
+  async train(req: TrainRequest, idempotencyKey?: string): Promise<TrainResponse> {
+    return this.request<TrainResponse>(
+      "POST",
+      "/train",
+      req,
+      undefined,
+      idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+    );
   }
 
   /** Train on strokes from multiple images in one call. */
-  async trainMulti(req: TrainMultiRequest): Promise<TrainResponse> {
-    return this.request<TrainResponse>("POST", "/train-multi", req);
+  async trainMulti(
+    req: TrainMultiRequest,
+    idempotencyKey?: string,
+  ): Promise<TrainResponse> {
+    return this.request<TrainResponse>(
+      "POST",
+      "/train-multi",
+      req,
+      undefined,
+      idempotencyKey ? { "Idempotency-Key": idempotencyKey } : undefined,
+    );
   }
 
   /**
@@ -81,6 +114,7 @@ export class ApiClient {
     dzipUrl: string;
     dziName: string;
     featureConfig: FeatureConfig;
+    generation?: number;
   }): string {
     const { classifierId, level, col, row, dzipUrl, dziName, featureConfig } =
       params;
@@ -94,6 +128,9 @@ export class ApiClient {
     u.searchParams.set("dzi_name", dziName);
     u.searchParams.set("filters", filters);
     u.searchParams.set("scales", scales);
+    if (params.generation !== undefined) {
+      u.searchParams.set("generation", String(params.generation));
+    }
     // img.src can't send headers — pass token as query param as fallback
     if (this.token) u.searchParams.set("token", this.token);
     return u.toString();

@@ -315,7 +315,21 @@ class HeadlessJobRequest(BaseModel):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", "hpc_host": HPC_HOST or "(not configured)"}
+    return {
+        "status": "ok",
+        "role": "slurm_bulk_export_allocator",
+        "execution_path": "ssh_sbatch",
+        "hpc_host": HPC_HOST or "(not configured)",
+        "configured": bool(HPC_HOST and HPC_USER),
+        "jobs": {
+            "total": len(_jobs),
+            "active": sum(
+                1
+                for job in _jobs.values()
+                if job["status"] not in ("done", "error", "cancelled")
+            ),
+        },
+    }
 
 
 @app.post("/headless-jobs")

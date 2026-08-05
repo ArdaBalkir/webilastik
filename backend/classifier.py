@@ -11,6 +11,7 @@ giving 10–100× speedups for the tile prediction workload.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 import numpy as np
@@ -51,10 +52,19 @@ class Classifier:
         n_estimators: int = 100,
         max_depth: int = 12,
         force_cpu: bool = False,
+        compute_threads: Optional[int] = None,
     ):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
         self.use_gpu = _GPU_AVAILABLE and not force_cpu
+        configured_threads = (
+            int(os.environ.get("COMPUTE_THREADS_PER_TASK", "1"))
+            if compute_threads is None
+            else compute_threads
+        )
+        if configured_threads < 1:
+            raise ValueError("COMPUTE_THREADS_PER_TASK must be at least 1")
+        self.compute_threads = configured_threads
         self.n_classes: int = 0
         self.classes_: Optional[np.ndarray] = None
         self._clf: object = None
@@ -92,7 +102,9 @@ class Classifier:
             self._clf = _SkRF(
                 n_estimators=self.n_estimators,
                 max_depth=self.max_depth,
-                n_jobs=2,  # cap per-job parallelism so concurrent trains don't starve each other
+                # Concurrency is owned by the session router.  Keeping the RF
+                # itself single-threaded by default avoids nested CPU pools.
+                n_jobs=self.compute_threads,
             )
             self._clf.fit(X, y)
             logger.debug(

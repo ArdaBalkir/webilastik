@@ -33,9 +33,9 @@ import pathlib
 import shutil
 import tempfile
 import threading
+import time
 import uuid
 from collections import defaultdict
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -51,6 +51,7 @@ from .classifier import Classifier
 from .encoding import encode_prediction_png
 from .dzi_source import DzipSource
 from .features import extract_features
+from .session_router import SessionRouter, SessionRouterError, WorkKind
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(level=logging.INFO)
@@ -72,6 +73,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+_session_router = SessionRouter()
+
+
+@app.exception_handler(SessionRouterError)
+async def _session_router_error_handler(
+    _request: Request, exc: SessionRouterError
+) -> JSONResponse:
+    headers = (
+        {"Retry-After": str(exc.retry_after)}
+        if exc.retry_after is not None
+        else None
+    )
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"detail": exc.detail},
+        headers=headers,
+    )
+
 # Serve frontend static files when dist/ exists (production mode)
 _DIST = pathlib.Path(__file__).parent.parent / "dist"
 if _DIST.is_dir():
@@ -80,34 +99,18 @@ if _DIST.is_dir():
 # ── CPU executor pools ───────────────────────────────────────────────────────
 # Train/export are heavyweight (sklearn, feature extraction across tiles).
 # Keep them on a small pool so they don't starve live prediction requests.
-_CPUS = os.cpu_count() or 4
-# At most 2 concurrent train/export jobs; each gets up to _CPUS cores via sklearn.
-_train_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="train")
-# Tile prediction is fast per tile; allow more concurrency here.
-_predict_executor = ThreadPoolExecutor(max_workers=_CPUS, thread_name_prefix="predict")
-
-# Hard cap: refuse a 3rd simultaneous train so the queue never grows silently.
-_train_semaphore = asyncio.Semaphore(2)
-
-
 async def _run_train(fn, *args):
-    """Run a CPU-heavy training/export task; returns HTTP 503 if already at capacity."""
-    if not _train_semaphore._value:  # non-blocking peek
-        from fastapi import HTTPException
-
-        raise HTTPException(
-            status_code=503,
-            detail="Server busy — too many concurrent training jobs, please retry shortly",
-        )
-    async with _train_semaphore:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_train_executor, fn, *args)
+    """Run non-classifier heavy work through bounded router admission."""
+    return await _session_router.run_utility(
+        WorkKind.TRAINING, "system", lambda: fn(*args)
+    )
 
 
 async def _run_predict(fn, *args):
-    """Run a lightweight predict/IO task."""
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(_predict_executor, fn, *args)
+    """Run non-classifier interactive work through bounded admission."""
+    return await _session_router.run_utility(
+        WorkKind.PREDICTION, "system", lambda: fn(*args)
+    )
 
 
 # Keep _run as an alias for predict (used by misc lightweight helpers).
@@ -120,53 +123,6 @@ async def _run(fn, *args):
 # installs a fresh classifier ID (which invalidates cached prediction tiles)
 # and removes that user's previous classifier immediately.
 # classifier_id → {"clf": Classifier, "last_used": float, "user_id": str}
-_CLF_TTL = 30 * 60  # 30 minutes
-_classifiers: Dict[str, Dict[str, Any]] = {}
-_user_classifier_ids: Dict[str, str] = {}
-_classifier_lock = threading.Lock()
-import time
-
-
-def _store_clf(user_id: str, clf: "Classifier") -> str:
-    """Atomically replace a user's classifier and return its new cache-safe ID."""
-    classifier_id = str(uuid.uuid4())
-    now = time.time()
-    with _classifier_lock:
-        previous_id = _user_classifier_ids.get(user_id)
-        if previous_id is not None:
-            _classifiers.pop(previous_id, None)
-        _classifiers[classifier_id] = {
-            "clf": clf,
-            "last_used": now,
-            "user_id": user_id,
-        }
-        _user_classifier_ids[user_id] = classifier_id
-
-    if previous_id is not None:
-        logger.info(
-            "[classifier] user %s replaced model %s with %s",
-            user_id,
-            previous_id,
-            classifier_id,
-        )
-    else:
-        logger.info("[classifier] user %s stored model %s", user_id, classifier_id)
-    return classifier_id
-
-
-def _get_clf(classifier_id: str, user_id: str) -> "Classifier":
-    """Return the user's current classifier, touch its TTL, or raise 404."""
-    with _classifier_lock:
-        entry = _classifiers.get(classifier_id)
-        if entry is None or entry["user_id"] != user_id:
-            raise HTTPException(
-                status_code=404,
-                detail="Classifier not found (may have been replaced or expired)",
-            )
-        entry["last_used"] = time.time()
-        return entry["clf"]
-
-
 # (dzip_url, token) → DzipSource (reuse HTTP sessions per token)
 _dzip_cache: Dict[tuple, DzipSource] = {}
 # export job_id → dict with status/progress
@@ -335,7 +291,10 @@ def _build_prediction_dzip(
                     logger.info("[build-dzip] %d/%d tiles done", done[0], total)
 
     tile_coords = [(c, r) for r in range(num_rows) for c in range(num_cols)]
-    with ThreadPoolExecutor(max_workers=min(32, os.cpu_count() or 4)) as pool:
+    # This is an explicit per-task budget; it is deliberately independent of
+    # os.cpu_count() so deployment limits are predictable.
+    tile_workers = max(1, int(os.environ.get("COMPUTE_THREADS_PER_TASK", "1")))
+    with ThreadPoolExecutor(max_workers=tile_workers) as pool:
         futures = [pool.submit(process_tile, c, r) for c, r in tile_coords]
         for f in as_completed(futures):
             f.result()  # propagate unexpected exceptions
@@ -400,6 +359,8 @@ class TrainRequest(BaseModel):
 class TrainResponse(BaseModel):
     classifier_id: str
     num_classes: int
+    generation: int = 1
+    worker_id: Optional[str] = None
 
 
 # Multi-image training — matches the annotations JSON format exactly
@@ -478,32 +439,20 @@ class SaveProjectRequest(BaseModel):
 
 @app.on_event("startup")
 async def _start_eviction_loop():
-    async def _evict():
-        while True:
-            await asyncio.sleep(60)
-            now = time.time()
-            with _classifier_lock:
-                expired = [
-                    k
-                    for k, v in _classifiers.items()
-                    if now - v["last_used"] > _CLF_TTL
-                ]
-                for k in expired:
-                    entry = _classifiers.pop(k)
-                    user_id = entry["user_id"]
-                    if _user_classifier_ids.get(user_id) == k:
-                        _user_classifier_ids.pop(user_id, None)
-            for k in expired:
-                logger.info("[evict] classifier %s removed after TTL", k)
+    await _session_router.start()
 
-    asyncio.create_task(_evict())
+
+@app.on_event("shutdown")
+async def _shutdown_worker_pool():
+    await _session_router.close()
 
 
 @app.get("/health")
 async def health():
-    with _classifier_lock:
-        classifier_count = len(_classifiers)
-    return {"status": "ok", "classifiers": classifier_count}
+    report = _session_router.health()
+    # Keep the original field for existing health consumers.
+    report["classifiers"] = report["registry"]["active_classifiers"]
+    return report
 
 
 @app.post("/save-project")
@@ -563,12 +512,13 @@ async def dzi_info(
 async def train(
     req: TrainRequest,
     authorization: Optional[str] = Header(default=None),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     user = _auth(authorization)
     user_id = get_user_id(user)
     logger.info("Train request from %s: %d strokes", user_id, len(req.strokes))
 
-    def _train() -> tuple[str, int]:
+    def _train() -> Classifier:
         dzip = _get_dzip(req.dzip_url, authorization)
         _, meta = dzip.find_dzi()
 
@@ -621,17 +571,28 @@ async def train(
         clf = Classifier()
         clf.fit(X, y)
 
-        clf_id = _store_clf(user_id, clf)
-        return clf_id, clf.n_classes
+        return clf
 
-    clf_id, n_classes = await _run_train(_train)
-    return TrainResponse(classifier_id=clf_id, num_classes=n_classes)
+    result = await _session_router.train(
+        user_id,
+        req.features.model_dump(),
+        _train,
+        idempotency_key=idempotency_key,
+        fingerprint=_session_router.request_fingerprint(req.model_dump()),
+    )
+    return TrainResponse(
+        classifier_id=result.classifier_id,
+        num_classes=result.model.n_classes,
+        generation=result.generation,
+        worker_id=result.worker_id,
+    )
 
 
 @app.post("/train-multi", response_model=TrainResponse)
 async def train_multi(
     req: TrainMultiRequest,
     authorization: Optional[str] = Header(default=None),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
 ):
     """Train a classifier from annotations across multiple images."""
     user = _auth(authorization)
@@ -644,7 +605,7 @@ async def train_multi(
         total_strokes,
     )
 
-    def _train_multi() -> tuple[str, int]:
+    def _train_multi() -> Classifier:
         from collections import defaultdict
 
         X_list: list[np.ndarray] = []
@@ -698,11 +659,21 @@ async def train_multi(
         logger.info("TrainMulti RF on %d samples, %d features", *X.shape)
         clf = Classifier()
         clf.fit(X, y)
-        clf_id = _store_clf(user_id, clf)
-        return clf_id, clf.n_classes
+        return clf
 
-    clf_id, n_classes = await _run_train(_train_multi)
-    return TrainResponse(classifier_id=clf_id, num_classes=n_classes)
+    result = await _session_router.train(
+        user_id,
+        req.features.model_dump(),
+        _train_multi,
+        idempotency_key=idempotency_key,
+        fingerprint=_session_router.request_fingerprint(req.model_dump()),
+    )
+    return TrainResponse(
+        classifier_id=result.classifier_id,
+        num_classes=result.model.n_classes,
+        generation=result.generation,
+        worker_id=result.worker_id,
+    )
 
 
 @app.get("/predict/{classifier_id}/{level}/{tile_spec}")
@@ -715,12 +686,13 @@ async def predict_tile(
     filters: str,
     scales: str,
     token: Optional[str] = None,
+    generation: Optional[int] = None,
     authorization: Optional[str] = Header(default=None),
 ):
     # Accept token via query param (img.src can't send headers)
     effective_auth = authorization or (f"Bearer {token}" if token else None)
     user = _auth(effective_auth)
-    clf = _get_clf(classifier_id, get_user_id(user))
+    user_id = get_user_id(user)
 
     parts = tile_spec.split("_")
     if len(parts) != 2:
@@ -729,7 +701,7 @@ async def predict_tile(
     filter_list = [f.strip() for f in filters.split(",") if f.strip()]
     scale_list = [float(s) for s in scales.split(",") if s.strip()]
 
-    def _predict() -> bytes:
+    def _predict(clf: Classifier) -> bytes:
         dzip = _get_dzip(dzip_url, effective_auth)
         _, meta = dzip.find_dzi()
 
@@ -743,7 +715,30 @@ async def predict_tile(
         return encode_prediction_png(proba, clf.classes_.tolist())
 
     try:
-        png_bytes = await _run_predict(_predict)
+        prediction_identity = _session_router.request_fingerprint(
+            {
+                "classifier_id": classifier_id,
+                "generation": generation,
+                "dzip_url": dzip_url,
+                "dzi_name": dzi_name,
+                "level": level,
+                "tile": tile_spec,
+                "filters": filter_list,
+                "scales": scale_list,
+            }
+        )
+        cache_key = f"{classifier_id}:{prediction_identity}"
+        png_bytes = await _session_router.run_model_task(
+            classifier_id,
+            user_id,
+            WorkKind.PREDICTION,
+            _predict,
+            generation=generation,
+            cache_key=cache_key,
+            singleflight_key=cache_key,
+        )
+    except SessionRouterError:
+        raise
     except KeyError:
         raise HTTPException(status_code=404, detail="Tile not found in archive")
     except Exception as e:
@@ -766,10 +761,16 @@ async def start_export(
     authorization: Optional[str] = Header(default=None),
 ):
     user = _auth(authorization)
-    clf = _get_clf(req.classifier_id, get_user_id(user))
+    user_id = get_user_id(user)
+    _session_router.authorize(req.classifier_id, user_id)
 
     job_id = str(uuid.uuid4())
-    _exports[job_id] = {"status": "pending", "progress": 0.0}
+    _exports[job_id] = {
+        "status": "pending",
+        "progress": 0.0,
+        "_user_id": user_id,
+        "classifier_id": req.classifier_id,
+    }
     logger.info(
         "[export-job %s] queued: output_url=%s dzip=%s level=%d",
         job_id,
@@ -777,7 +778,7 @@ async def start_export(
         req.dzip_url,
         req.level,
     )
-    asyncio.create_task(_run_export(job_id, req, clf, authorization))
+    asyncio.create_task(_run_export(job_id, req, user_id, authorization))
     return {"job_id": job_id}
 
 
@@ -786,11 +787,14 @@ async def export_status(
     job_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
-    _auth(authorization)
+    user = _auth(authorization)
+    user_id = get_user_id(user)
     job = _exports.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Export job not found")
-    return job
+    if job.get("_user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Export job belongs to another user")
+    return {key: value for key, value in job.items() if not key.startswith("_")}
 
 
 # ── Source listing ─────────────────────────────────────────────────────────────
@@ -871,7 +875,8 @@ async def start_batch_export(
     with the given classifier, write results to output_dir/{name}.dzip.
     """
     user = _auth(authorization)
-    clf = _get_clf(req.classifier_id, get_user_id(user))
+    user_id = get_user_id(user)
+    _session_router.authorize(req.classifier_id, user_id)
 
     job_id = str(uuid.uuid4())
     _batch_jobs[job_id] = {
@@ -880,6 +885,8 @@ async def start_batch_export(
         "total": 0,
         "done": 0,
         "failed": [],
+        "_user_id": user_id,
+        "classifier_id": req.classifier_id,
     }
     logger.info(
         "[batch %s] queued: p_source=%s output_dir=%s",
@@ -887,7 +894,7 @@ async def start_batch_export(
         req.p_source,
         req.output_dir,
     )
-    asyncio.create_task(_run_batch(job_id, req, clf, authorization))
+    asyncio.create_task(_run_batch(job_id, req, user_id, authorization))
     return {"job_id": job_id}
 
 
@@ -896,11 +903,14 @@ async def batch_export_status(
     job_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
-    _auth(authorization)
+    user = _auth(authorization)
+    user_id = get_user_id(user)
     job = _batch_jobs.get(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Batch job not found")
-    return job
+    if job.get("_user_id") != user_id:
+        raise HTTPException(status_code=403, detail="Batch job belongs to another user")
+    return {key: value for key, value in job.items() if not key.startswith("_")}
 
 
 # ── Headless run ───────────────────────────────────────────────────────────────
@@ -978,22 +988,28 @@ async def headless_run(
         y = np.array(combined_y, dtype=int)
         clf_obj = Classifier()
         clf_obj.fit(X, y)
-        cid = _store_clf(user_id, clf_obj)
-        logger.info(
-            "[headless] trained classifier %s on %d pixels from %d images",
-            cid,
-            len(y),
-            len(req.annotations),
-        )
-        return cid, int(np.unique(y).shape[0])
+        return clf_obj
 
     try:
-        cid, num_cls = await _run_train(_train_headless)
+        training = await _session_router.train(
+            user_id,
+            req.features.model_dump(),
+            _train_headless,
+            fingerprint=_session_router.request_fingerprint(req.model_dump()),
+        )
+        cid = training.classifier_id
+        num_cls = training.model.n_classes
+        logger.info(
+            "[headless] trained classifier %s from %d images",
+            cid,
+            len(req.annotations),
+        )
+    except SessionRouterError:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Training failed: {e}") from e
 
     # 2 — Batch export
-    clf = _get_clf(cid, user_id)
     batch_req = BatchExportRequest(
         classifier_id=cid,
         p_source=req.p_source,
@@ -1008,8 +1024,10 @@ async def headless_run(
         "total": 0,
         "done": 0,
         "failed": [],
+        "_user_id": user_id,
+        "classifier_id": cid,
     }
-    asyncio.create_task(_run_batch(job_id, batch_req, clf, authorization))
+    asyncio.create_task(_run_batch(job_id, batch_req, user_id, authorization))
     logger.info("[headless] batch job queued: %s", job_id)
     return {"classifier_id": cid, "num_classes": num_cls, "batch_job_id": job_id}
 
@@ -1026,14 +1044,14 @@ async def export_zip(
     the viewer or any other DZI-capable tool.
     """
     user = _auth(authorization)
-    clf = _get_clf(req.classifier_id, get_user_id(user))
+    user_id = get_user_id(user)
     logger.info(
         "[export-zip] start: output_url=%s dzip=%s",
         req.output_url or "(download)",
         req.dzip_url,
     )
 
-    def _do() -> tuple[bytes, str]:
+    def _do(clf: Classifier) -> tuple[bytes, str]:
         tmpdir, dzip_path = _build_prediction_dzip(
             req.dzip_url,
             req.dzi_name,
@@ -1048,7 +1066,12 @@ async def export_zip(
             shutil.rmtree(tmpdir, ignore_errors=True)
             logger.info("[export-zip] cleaned up tmpdir")
 
-    zip_bytes, filename = await _run_train(_do)
+    zip_bytes, filename = await _session_router.run_model_task(
+        req.classifier_id,
+        user_id,
+        WorkKind.TRAINING,
+        _do,
+    )
 
     if req.output_url:
         token: Optional[str] = None
@@ -1110,7 +1133,7 @@ async def export_zip(
 async def _run_export(
     job_id: str,
     req: ExportRequest,
-    clf: Classifier,
+    user_id: str,
     authorization: Optional[str] = None,
 ) -> None:
     try:
@@ -1122,7 +1145,7 @@ async def _run_export(
             req.dzip_url,
         )
 
-        def _do():
+        def _do(clf: Classifier):
             import requests as _req
 
             tmpdir, dzip_path = _build_prediction_dzip(
@@ -1174,7 +1197,12 @@ async def _run_export(
                 shutil.rmtree(tmpdir, ignore_errors=True)
                 logger.info("[export-job %s] cleaned up tmpdir", job_id)
 
-        await _run_train(_do)
+        await _session_router.run_model_task(
+            req.classifier_id,
+            user_id,
+            WorkKind.TRAINING,
+            _do,
+        )
         _exports[job_id]["status"] = "done"
         _exports[job_id]["progress"] = 1.0
     except Exception as e:
@@ -1189,7 +1217,7 @@ async def _run_export(
 async def _run_batch(
     job_id: str,
     req: "BatchExportRequest",
-    clf: Classifier,
+    user_id: str,
     authorization: Optional[str] = None,
 ) -> None:
     """
@@ -1263,7 +1291,7 @@ async def _run_batch(
 
             try:
 
-                def _process(url=src_url, name=src_name):
+                def _process(clf: Classifier, url=src_url, name=src_name):
                     # Derive dzi_name from the DZIP filename
                     dzi_name = name.replace(".dzip", "").replace(".zip", "")
                     tmpdir, dzip_path = _build_prediction_dzip(
@@ -1280,7 +1308,12 @@ async def _run_batch(
                     finally:
                         shutil.rmtree(tmpdir, ignore_errors=True)
 
-                zip_bytes, _ = await _run_train(_process)
+                zip_bytes, _ = await _session_router.run_model_task(
+                    req.classifier_id,
+                    user_id,
+                    WorkKind.TRAINING,
+                    _process,
+                )
 
                 def _upload(data=zip_bytes, target=dest_url):
                     logger.info(
