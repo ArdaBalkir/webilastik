@@ -313,13 +313,34 @@ def prefetch_sources(
                     sess = requests.Session()  # no auth for S3
             except Exception:
                 pass
-        with sess.get(url, stream=True, timeout=60) as r:
-            r.raise_for_status()
-            total_bytes = int(r.headers.get("content-length", 0))
-            with open(dest, "wb") as f:
-                for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB chunks
-                    f.write(chunk)
-        logger.info("  [prefetch] %s done (%s bytes)", name, f"{dest.stat().st_size:,}")
+        tmp_path: Optional[pathlib.Path] = None
+        try:
+            with sess.get(url, stream=True, timeout=60) as r:
+                r.raise_for_status()
+                with tempfile.NamedTemporaryFile(
+                    mode="wb",
+                    prefix=f".{name}.",
+                    suffix=".part",
+                    dir=dest_dir,
+                    delete=False,
+                ) as f:
+                    tmp_path = pathlib.Path(f.name)
+                    for chunk in r.iter_content(chunk_size=1 << 20):  # 1 MB chunks
+                        if chunk:
+                            f.write(chunk)
+                    downloaded_bytes = f.tell()
+
+            # Publish only a complete download. os.replace is atomic on the
+            # destination filesystem, so concurrent jobs never observe a
+            # partially written DZIP.
+            assert tmp_path is not None
+            os.replace(tmp_path, dest)
+            tmp_path = None
+        finally:
+            if tmp_path is not None:
+                tmp_path.unlink(missing_ok=True)
+
+        logger.info("  [prefetch] %s done (%s bytes)", name, f"{downloaded_bytes:,}")
         with lock:
             results[name] = dest
 
@@ -650,8 +671,10 @@ def run(
             logger.info("  uploading → %s", dest_url)
             upload_dzip(dzip_path, dest_url, token)
             logger.info("  ✓ done")
-            # Free the downloaded source DZIP immediately to reclaim workdir space
-            if local_path and local_path.exists():
+            # Throwaway prefetch directories can be reclaimed immediately.
+            # Explicit directories are persistent caches and may be shared by
+            # concurrent jobs, so their entries must not be removed here.
+            if _own_prefetch_dir and local_path and local_path.exists():
                 local_path.unlink(missing_ok=True)
                 logger.info("  cleaned %s from workdir", local_path.name)
         except Exception as e:

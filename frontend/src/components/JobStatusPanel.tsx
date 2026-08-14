@@ -27,6 +27,16 @@ function makeClient() {
   );
 }
 
+function formatJobDateTime(timestamp: number): string {
+  return new Date(timestamp).toLocaleString(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
 // ── Single job card ────────────────────────────────────────────────────────────
 
 function JobCard({ job }: { job: HpcJobRecord }) {
@@ -72,7 +82,7 @@ function JobCard({ job }: { job: HpcJobRecord }) {
       <div class="job-header">
         <span class="job-badge">{statusLabel(job.status)}</span>
         <span class="job-slurm" title={job.job_id}>#{job.slurm_job_id}</span>
-        <span class="job-time">{new Date(job.created_at).toLocaleTimeString()}</span>
+        <span class="job-time">{formatJobDateTime(job.created_at)}</span>
         {!isTerminal && (
           <button
             class="btn-sm danger"
@@ -157,7 +167,7 @@ export function JobStatusPanel() {
               <span class="job-badge job-badge-sm">{statusLabel(r.status)}</span>
               <span class="job-slurm">#{r.slurm_job_id}</span>
               <span class="job-time">
-                {new Date(r.created_at).toLocaleTimeString()}
+                {formatJobDateTime(r.created_at)}
               </span>
             </div>
           ))}

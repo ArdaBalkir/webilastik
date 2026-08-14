@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import os
@@ -95,6 +96,13 @@ def _raw_token(authorization: Optional[str]) -> Optional[str]:
         return None
     parts = authorization.split()
     return parts[1] if len(parts) == 2 else authorization
+
+
+def _cache_namespace(user_id: str, p_source: str) -> str:
+    """Return a stable, shell-safe cache namespace for one user and source."""
+    user_key = hashlib.sha256(user_id.encode()).hexdigest()[:24]
+    source_key = hashlib.sha256(p_source.rstrip("/").encode()).hexdigest()[:24]
+    return f"{user_key}/{source_key}"
 
 
 # ── SSH helpers ───────────────────────────────────────────────────────────────
@@ -156,6 +164,7 @@ def _build_sbatch_script(
     level: Optional[int],
     token: Optional[str],
     cpus: int,
+    cache_namespace: str,
 ) -> str:
     level_flag = f"--level {level}" if level is not None else ""
     t_source_flag = f"--t-source '{t_source}'" if t_source else ""
@@ -210,7 +219,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
         --features '{features_json}' \\
         {level_flag} \\
         {token_flag} \\
-        --prefetch-dir /p/scratch/ebrains-0000003/wi2_cache \\
+        --prefetch-dir /p/scratch/ebrains-0000003/wi2_cache/{cache_namespace} \\
         --workers $SLURM_CPUS_PER_TASK
 
 EXIT_CODE=$?
@@ -344,6 +353,7 @@ async def create_headless_job(
         level=req.level,
         token=token,
         cpus=req.cpus or HPC_CPUS,
+        cache_namespace=_cache_namespace(user_id, req.p_source),
     )
 
     try:
