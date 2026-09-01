@@ -21,56 +21,22 @@ function readParam(key: string) {
   return new URLSearchParams(window.location.search).get(key) ?? "";
 }
 
-const OVERLAY_EXTENSIONS = new Set([
-  ".dzip", ".zip", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif",
-]);
-
-function splitExtension(name: string): { stem: string; extension: string } {
-  const dot = name.lastIndexOf(".");
-  if (dot <= 0) return { stem: name, extension: "" };
-  return {
-    stem: name.slice(0, dot),
-    extension: name.slice(dot).toLowerCase(),
-  };
-}
-
-/** Pick the stored overlay that belongs to a source image. */
 export function findSegmentationSource(
   sourceName: string,
   candidates: SourceEntry[],
 ): SourceEntry | null {
-  // Preserve the original convention first: segmentations/foo.dzip matches
-  // zipped_images/foo.dzip exactly.
-  const exact = candidates.find((candidate) => candidate.name === sourceName);
-  if (exact) return exact;
-
-  const sourceStem = splitExtension(sourceName).stem.toLowerCase();
-  const usable = candidates.filter((candidate) =>
-    OVERLAY_EXTENSIONS.has(splitExtension(candidate.name).extension),
+  const stem = (name: string) => name.replace(/\.[^.]+$/, "").toLowerCase();
+  const sequence = (name: string) =>
+    name.match(/(?:^|_)(s\d{4})(?!\d)/i)?.[1].toLowerCase();
+  const usable = candidates.filter(({ name }) =>
+    /\.(?:d?zip|png|jpe?g|webp|gif|bmp|avif)$/i.test(name),
   );
-
-  // Also accept a different container/format with the same basename, such as
-  // foo.png for foo.dzip.
-  const sameStem = usable.find(
-    (candidate) => splitExtension(candidate.name).stem.toLowerCase() === sourceStem,
-  );
-  if (sameStem) return sameStem;
-
-  // Basenames can differ while retaining the image sequence id (`_s0000`).
-  const sequenceId = sourceStem.match(/(?:^|_)(s\d{4})(?:_|$)/)?.[1];
-  if (sequenceId) {
-    const sameSequence = usable.find((candidate) =>
-      splitExtension(candidate.name).stem.toLowerCase()
-        .match(/(?:^|_)(s\d{4})(?:_|$)/)?.[1] === sequenceId,
-    );
-    if (sameSequence) return sameSequence;
-  }
-
-  // Single-export output commonly uses this suffix.
-  return usable.find(
-    (candidate) =>
-      splitExtension(candidate.name).stem.toLowerCase() === `${sourceStem}_predictions`,
-  ) ?? null;
+  const sourceStem = stem(sourceName);
+  const sourceSequence = sequence(sourceName);
+  return candidates.find(({ name }) => name === sourceName)
+    ?? usable.find(({ name }) => stem(name) === sourceStem)
+    ?? usable.find(({ name }) => !!sourceSequence && sequence(name) === sourceSequence)
+    ?? null;
 }
 
 export function ViewerApp() {
@@ -84,8 +50,6 @@ export function ViewerApp() {
   const workdir   = useSignal(readParam("workdir"));
 
   const sources      = useSignal<SourceEntry[]>([]);
-  const segmentations = useSignal<SourceEntry[]>([]);
-  const segmentationListError = useSignal("");
   const loadingList  = useSignal(false);
   const listError    = useSignal("");
 
@@ -118,22 +82,13 @@ export function ViewerApp() {
     if (!dir) return;
     loadingList.value = true;
     listError.value   = "";
-    segmentationListError.value = "";
     const api = new ApiClient(serverUrl.value, token.value);
     const base = dir.replace(/\/$/, "");
     api.listSources(base + "/zipped_images/")
       .then((list) => { sources.value = list; })
       .catch((e)   => { listError.value = String(e); })
       .finally(()  => { loadingList.value = false; });
-    // An empty extension deliberately lists every object. Filtering and
-    // basename matching happen locally so raster overlays can be discovered.
-    const segmentationRequest = api.listObjects(base + "/segmentations/", "")
-      .then((list) => { segmentations.value = list; })
-      .catch((e) => {
-        segmentations.value = [];
-        segmentationListError.value = String(e);
-      });
-    segmentationListRef.current = segmentationRequest.then(() => segmentations.value);
+    segmentationListRef.current = api.listObjects(base + "/segmentations/", "");
   }, [workdir.value]);
 
   async function selectSource(src: SourceEntry) {
@@ -154,27 +109,23 @@ export function ViewerApp() {
     }
     loadingImage.value = false;
 
-    // Auto-load a matching segmentation. Exact object names remain preferred,
-    // with same-basename raster/DZIP files accepted as a fallback.
-    const segBase = workdir.value.replace(/\/$/, "") + "/segmentations/";
-    const availableSegmentations = segmentationListRef.current
-      ? await segmentationListRef.current
-      : segmentations.value;
-    const match = findSegmentationSource(src.name, availableSegmentations);
-    const segUrl = match?.object_url ?? segBase + src.name;
+    const candidates = await segmentationListRef.current?.catch(() => []) ?? [];
+    const match = findSegmentationSource(src.name, candidates);
+    if (!match) {
+      segStatus.value = "error";
+      segError.value = `No matching segmentation for ${src.name}`;
+      return;
+    }
     segStatus.value = "loading";
     segError.value  = "";
     try {
       const headers: Record<string, string> = token.value
         ? { Authorization: `Bearer ${token.value}` } : {};
-      await segRef.current!.load(segUrl, headers);
+      await segRef.current!.load(match.object_url, headers);
       segStatus.value = "ready";
     } catch (e) {
       segStatus.value = "error";
-      const listingDetail = segmentationListError.value
-        ? ` (overlay listing also failed: ${segmentationListError.value})`
-        : "";
-      segError.value  = `Segmentation not found: ${e}${listingDetail}`;
+      segError.value  = `Segmentation not found: ${e}`;
     }
   }
 
