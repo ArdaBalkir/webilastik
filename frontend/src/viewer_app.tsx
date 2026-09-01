@@ -13,24 +13,79 @@ import type { SourceEntry } from "./types";
  *
  * Shows source images from workdir/zipped_images/ with their matching
  * prediction overlay from workdir/segmentations/ — no annotation tools,
- * no training, no dzsave needed.  Prediction tiles are loaded directly from
- * the prediction DZIP in the browser.
+ * no training, no dzsave needed. Predictions can be loaded from either a
+ * prediction DZIP or a browser-readable flat image.
  */
 
 function readParam(key: string) {
   return new URLSearchParams(window.location.search).get(key) ?? "";
 }
 
+const OVERLAY_EXTENSIONS = new Set([
+  ".dzip", ".zip", ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".avif",
+]);
+
+function splitExtension(name: string): { stem: string; extension: string } {
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return { stem: name, extension: "" };
+  return {
+    stem: name.slice(0, dot),
+    extension: name.slice(dot).toLowerCase(),
+  };
+}
+
+/** Pick the stored overlay that belongs to a source image. */
+export function findSegmentationSource(
+  sourceName: string,
+  candidates: SourceEntry[],
+): SourceEntry | null {
+  // Preserve the original convention first: segmentations/foo.dzip matches
+  // zipped_images/foo.dzip exactly.
+  const exact = candidates.find((candidate) => candidate.name === sourceName);
+  if (exact) return exact;
+
+  const sourceStem = splitExtension(sourceName).stem.toLowerCase();
+  const usable = candidates.filter((candidate) =>
+    OVERLAY_EXTENSIONS.has(splitExtension(candidate.name).extension),
+  );
+
+  // Also accept a different container/format with the same basename, such as
+  // foo.png for foo.dzip.
+  const sameStem = usable.find(
+    (candidate) => splitExtension(candidate.name).stem.toLowerCase() === sourceStem,
+  );
+  if (sameStem) return sameStem;
+
+  // Basenames can differ while retaining the image sequence id (`_s0000`).
+  const sequenceId = sourceStem.match(/(?:^|_)(s\d{4})(?:_|$)/)?.[1];
+  if (sequenceId) {
+    const sameSequence = usable.find((candidate) =>
+      splitExtension(candidate.name).stem.toLowerCase()
+        .match(/(?:^|_)(s\d{4})(?:_|$)/)?.[1] === sequenceId,
+    );
+    if (sameSequence) return sameSequence;
+  }
+
+  // Single-export output commonly uses this suffix.
+  return usable.find(
+    (candidate) =>
+      splitExtension(candidate.name).stem.toLowerCase() === `${sourceStem}_predictions`,
+  ) ?? null;
+}
+
 export function ViewerApp() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef    = useRef<DziViewer | null>(null);
   const segRef       = useRef<SegmentationOverlay | null>(null);
+  const segmentationListRef = useRef<Promise<SourceEntry[]> | null>(null);
 
   const token     = useSignal(readParam("token"));
   const serverUrl = useSignal(readParam("server") || (import.meta.env.VITE_COMPUTE_SERVER_URL ?? "http://localhost:8000"));
   const workdir   = useSignal(readParam("workdir"));
 
   const sources      = useSignal<SourceEntry[]>([]);
+  const segmentations = useSignal<SourceEntry[]>([]);
+  const segmentationListError = useSignal("");
   const loadingList  = useSignal(false);
   const listError    = useSignal("");
 
@@ -63,11 +118,22 @@ export function ViewerApp() {
     if (!dir) return;
     loadingList.value = true;
     listError.value   = "";
-    new ApiClient(serverUrl.value, token.value)
-      .listSources(dir.replace(/\/$/, "") + "/zipped_images/")
+    segmentationListError.value = "";
+    const api = new ApiClient(serverUrl.value, token.value);
+    const base = dir.replace(/\/$/, "");
+    api.listSources(base + "/zipped_images/")
       .then((list) => { sources.value = list; })
       .catch((e)   => { listError.value = String(e); })
       .finally(()  => { loadingList.value = false; });
+    // An empty extension deliberately lists every object. Filtering and
+    // basename matching happen locally so raster overlays can be discovered.
+    const segmentationRequest = api.listObjects(base + "/segmentations/", "")
+      .then((list) => { segmentations.value = list; })
+      .catch((e) => {
+        segmentations.value = [];
+        segmentationListError.value = String(e);
+      });
+    segmentationListRef.current = segmentationRequest.then(() => segmentations.value);
   }, [workdir.value]);
 
   async function selectSource(src: SourceEntry) {
@@ -88,9 +154,14 @@ export function ViewerApp() {
     }
     loadingImage.value = false;
 
-    // Auto-load matching segmentation DZIP
+    // Auto-load a matching segmentation. Exact object names remain preferred,
+    // with same-basename raster/DZIP files accepted as a fallback.
     const segBase = workdir.value.replace(/\/$/, "") + "/segmentations/";
-    const segUrl  = segBase + src.name;
+    const availableSegmentations = segmentationListRef.current
+      ? await segmentationListRef.current
+      : segmentations.value;
+    const match = findSegmentationSource(src.name, availableSegmentations);
+    const segUrl = match?.object_url ?? segBase + src.name;
     segStatus.value = "loading";
     segError.value  = "";
     try {
@@ -100,7 +171,10 @@ export function ViewerApp() {
       segStatus.value = "ready";
     } catch (e) {
       segStatus.value = "error";
-      segError.value  = `Segmentation not found: ${e}`;
+      const listingDetail = segmentationListError.value
+        ? ` (overlay listing also failed: ${segmentationListError.value})`
+        : "";
+      segError.value  = `Segmentation not found: ${e}${listingDetail}`;
     }
   }
 
