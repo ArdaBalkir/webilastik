@@ -172,7 +172,7 @@ async function netunzip(
       );
       const data = new Uint8Array(rawBuf);
       if (allowCompressed || method === 0) return data; // stored
-      if (method === 8) return inflate(data);
+      if (method === 8) return inflateRaw(data);
       throw new Error(`Unsupported method ${method}`);
     },
   };
@@ -180,7 +180,7 @@ async function netunzip(
 
 // Uses the browser's native DecompressionStream for raw deflate (RFC 1951).
 // Replaces the prior incomplete manual inflate implementation.
-async function inflate(src: Uint8Array): Promise<Uint8Array> {
+export async function inflateRaw(src: Uint8Array): Promise<Uint8Array> {
   const ds = new DecompressionStream("deflate-raw");
   const writer = ds.writable.getWriter();
   const reader = ds.readable.getReader();

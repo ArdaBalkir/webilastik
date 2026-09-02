@@ -3,6 +3,7 @@ import { useEffect, useRef } from "preact/hooks";
 import { useSignal } from "@preact/signals";
 import { DziViewer } from "./dzi_viewer";
 import { SegmentationOverlay } from "./seg_overlay";
+import { AtlasOverlay } from "./atlas_overlay";
 import { ApiClient } from "./api";
 import type { SourceEntry } from "./types";
 
@@ -10,6 +11,7 @@ import type { SourceEntry } from "./types";
  * ViewerApp — clean overlay viewer
  * ----------------------------------
  * URL: ?mode=viewer&workdir=<data-proxy-dir>&token=<bearer>&server=<api-url>
+ *      &registration=<webwarp-json-url>&atlas=<atlas-name>
  *
  * Shows source images from workdir/zipped_images/ with their matching
  * prediction overlay from workdir/segmentations/ — no annotation tools,
@@ -43,11 +45,16 @@ export function ViewerApp() {
   const containerRef = useRef<HTMLDivElement>(null);
   const viewerRef    = useRef<DziViewer | null>(null);
   const segRef       = useRef<SegmentationOverlay | null>(null);
+  const atlasRef     = useRef<AtlasOverlay | null>(null);
   const segmentationListRef = useRef<Promise<SourceEntry[]> | null>(null);
 
   const token     = useSignal(readParam("token"));
   const serverUrl = useSignal(readParam("server") || (import.meta.env.VITE_COMPUTE_SERVER_URL ?? "http://localhost:8000"));
   const workdir   = useSignal(readParam("workdir"));
+  const registrationUrl = useSignal(
+    readParam("registration") || readParam("registration_url"),
+  );
+  const atlasName = useSignal(readParam("atlas") || readParam("atlas_name"));
 
   const sources      = useSignal<SourceEntry[]>([]);
   const loadingList  = useSignal(false);
@@ -62,19 +69,30 @@ export function ViewerApp() {
   const segStatus  = useSignal<"none" | "loading" | "ready" | "error">("none");
   const segError   = useSignal("");
 
+  const atlasVisible = useSignal(true);
+  const atlasOpacity = useSignal(0.5);
+  const atlasStatus = useSignal<"idle" | "loading" | "ready" | "error">("idle");
+  const atlasProgress = useSignal("");
+  const atlasError = useSignal("");
+  const loadedAtlasName = useSignal("");
+
   // Init viewer + overlay once on mount
   useEffect(() => {
     const container = containerRef.current!;
     const viewer = new DziViewer(container);
     const seg    = new SegmentationOverlay(container, viewer);
+    const atlas  = new AtlasOverlay(container, viewer);
     viewerRef.current = viewer;
     segRef.current    = seg;
-    return () => { viewer.destroy(); seg.destroy(); };
+    atlasRef.current  = atlas;
+    return () => { atlas.destroy(); seg.destroy(); viewer.destroy(); };
   }, []);
 
   // Keep segmentation visibility / opacity in sync
   useEffect(() => segVisible.subscribe((v) => segRef.current?.setVisible(v)), []);
   useEffect(() => segOpacity.subscribe((o) => segRef.current?.setOpacity(o)), []);
+  useEffect(() => atlasVisible.subscribe((v) => atlasRef.current?.setVisible(v)), []);
+  useEffect(() => atlasOpacity.subscribe((o) => atlasRef.current?.setOpacity(o)), []);
 
   // Load source list on mount (or when workdir changes)
   useEffect(() => {
@@ -97,6 +115,8 @@ export function ViewerApp() {
     loadingImage.value  = true;
     segStatus.value     = "none";
     segRef.current?.clear();
+    atlasRef.current?.clearSection();
+    atlasError.value = "";
 
     try {
       const headers: Record<string, string> = token.value
@@ -108,6 +128,8 @@ export function ViewerApp() {
       return;
     }
     loadingImage.value = false;
+
+    if (atlasStatus.value === "ready") displayAtlasForSource(src);
 
     const candidates = await segmentationListRef.current?.catch(() => []) ?? [];
     const match = findSegmentationSource(src.name, candidates);
@@ -126,6 +148,48 @@ export function ViewerApp() {
     } catch (e) {
       segStatus.value = "error";
       segError.value  = `Segmentation not found: ${e}`;
+    }
+  }
+
+  function displayAtlasForSource(src: SourceEntry) {
+    const candidates = [src.name, viewerRef.current?.dziName]
+      .filter((name): name is string => !!name);
+    let lastError: unknown;
+    for (const name of new Set(candidates)) {
+      try {
+        atlasRef.current!.selectSource(name);
+        atlasError.value = "";
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+    atlasError.value = lastError instanceof Error
+      ? lastError.message : String(lastError);
+  }
+
+  async function loadAtlasOverlay() {
+    if (!registrationUrl.value || !atlasName.value || !atlasRef.current) return;
+    atlasStatus.value = "loading";
+    atlasProgress.value = "Loading registration…";
+    atlasError.value = "";
+    loadedAtlasName.value = "";
+    try {
+      const headers: Record<string, string> = token.value
+        ? { Authorization: `Bearer ${token.value}` } : {};
+      loadedAtlasName.value = await atlasRef.current.load(
+        registrationUrl.value,
+        atlasName.value,
+        headers,
+        (message) => { atlasProgress.value = message; },
+      );
+      atlasStatus.value = "ready";
+      atlasProgress.value = "";
+      if (activeSource.value) displayAtlasForSource(activeSource.value);
+    } catch (error) {
+      atlasStatus.value = "error";
+      atlasProgress.value = "";
+      atlasError.value = error instanceof Error ? error.message : String(error);
     }
   }
 
@@ -205,6 +269,64 @@ export function ViewerApp() {
             )}
           </div>
         )}
+
+        {/* Atlas cut overlay controls */}
+        <div class="viewer-toolbar-group">
+          <label class="viewer-toolbar-label">Atlas</label>
+          <button
+            class="btn-sm"
+            onClick={loadAtlasOverlay}
+            disabled={
+              atlasStatus.value === "loading" ||
+              !registrationUrl.value ||
+              !atlasName.value
+            }
+            title={
+              !registrationUrl.value || !atlasName.value
+                ? "Provide ?registration= and ?atlas= in the URL"
+                : "Load the registered atlas cut"
+            }
+          >
+            {atlasStatus.value === "loading" ? "Loading atlas…" : "Load atlas"}
+          </button>
+          {(!registrationUrl.value || !atlasName.value) && (
+            <span class="muted">needs ?registration= and ?atlas=</span>
+          )}
+          {atlasStatus.value === "loading" && (
+            <span class="muted">{atlasProgress.value}</span>
+          )}
+          {atlasError.value && <span class="error">{atlasError.value}</span>}
+          {atlasStatus.value === "ready" && (
+            <>
+              <span class="muted">{loadedAtlasName.value}</span>
+              <label class="viewer-toolbar-check">
+                <input
+                  type="checkbox"
+                  checked={atlasVisible.value}
+                  onChange={(event) =>
+                    (atlasVisible.value =
+                      (event.target as HTMLInputElement).checked)
+                  }
+                />
+                Show atlas
+              </label>
+              <label class="viewer-toolbar-check">
+                Opacity
+                <input
+                  type="range"
+                  min={0} max={100}
+                  value={Math.round(atlasOpacity.value * 100)}
+                  onInput={(event) =>
+                    (atlasOpacity.value =
+                      parseInt((event.target as HTMLInputElement).value) / 100)
+                  }
+                  style="width:80px"
+                />
+                <span class="muted">{Math.round(atlasOpacity.value * 100)}%</span>
+              </label>
+            </>
+          )}
+        </div>
       </div>
 
       {/* ── Canvas area ──────────────────────────────────────────────── */}
