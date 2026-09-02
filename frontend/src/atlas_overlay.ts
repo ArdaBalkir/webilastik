@@ -1,4 +1,5 @@
 import type { DziViewer } from "./dzi_viewer";
+import type { OverlayBlendMode } from "./types";
 
 interface AtlasLabel {
   rgb?: string;
@@ -43,6 +44,7 @@ type AtlasWorkerMessage =
 
 type Point = [number, number];
 type Triangle = [number, number, number];
+export type AtlasDisplayMode = "fill" | "outline";
 
 /** A WebWarp registration plane rendered over the active DZI image. */
 export class AtlasOverlay {
@@ -53,9 +55,12 @@ export class AtlasOverlay {
   private readonly resizeObserver: ResizeObserver;
   private atlas: AtlasVolume | null = null;
   private registration: RegistrationFile | null = null;
+  private renderedCut: AtlasCut | null = null;
   private sliceCanvas: HTMLCanvasElement | null = null;
   private visible = true;
   private opacity = 0.5;
+  private displayMode: AtlasDisplayMode = "fill";
+  private smoothEdges = true;
   private dirty = false;
   private rafId = 0;
 
@@ -98,6 +103,7 @@ export class AtlasOverlay {
 
   /** Select and cut the registration entry matching an image filename. */
   selectSource(sourceName: string): string {
+    this.renderedCut = null;
     this.sliceCanvas = null;
     if (!this.registration || !this.atlas) {
       this.dirty = true;
@@ -116,14 +122,16 @@ export class AtlasOverlay {
 
     const cut = cutAtlas(this.atlas, plane);
     const markers = normalizeMarkers(section.markers);
-    this.sliceCanvas = markers.length > 0
-      ? warpCut(cut, this.atlas.labels, markers, section.width, section.height)
-      : colorCut(cut, this.atlas.labels);
+    this.renderedCut = markers.length > 0
+      ? warpCut(cut, markers, section.width, section.height)
+      : cut;
+    this.rebuildSliceCanvas();
     this.dirty = true;
     return section.filename ?? section.name ?? sourceName;
   }
 
   clearSection() {
+    this.renderedCut = null;
     this.sliceCanvas = null;
     this.dirty = true;
   }
@@ -142,6 +150,20 @@ export class AtlasOverlay {
   setOpacity(opacity: number) {
     this.opacity = opacity;
     this.dirty = true;
+  }
+
+  setDisplayMode(mode: AtlasDisplayMode) {
+    this.displayMode = mode;
+    this.rebuildSliceCanvas();
+  }
+
+  setSmoothEdges(smooth: boolean) {
+    this.smoothEdges = smooth;
+    this.dirty = true;
+  }
+
+  setBlendMode(mode: OverlayBlendMode) {
+    this.canvas.style.mixBlendMode = mode;
   }
 
   destroy() {
@@ -179,7 +201,8 @@ export class AtlasOverlay {
     const [canvasX, canvasY] = viewer.imageToCanvas(0, 0);
     ctx.save();
     ctx.globalAlpha = this.opacity;
-    ctx.imageSmoothingEnabled = false;
+    ctx.imageSmoothingEnabled = this.smoothEdges;
+    if (this.smoothEdges) ctx.imageSmoothingQuality = "high";
     ctx.drawImage(
       sliceCanvas,
       canvasX,
@@ -188,6 +211,13 @@ export class AtlasOverlay {
       viewer.meta_.height * viewer.viewZoom,
     );
     ctx.restore();
+  }
+
+  private rebuildSliceCanvas() {
+    this.sliceCanvas = this.renderedCut && this.atlas
+      ? colorCut(this.renderedCut, this.atlas.labels, this.displayMode)
+      : null;
+    this.dirty = true;
   }
 }
 
@@ -334,17 +364,34 @@ function cutAtlas(atlas: AtlasVolume, plane: number[]): AtlasCut {
   return { ids, width, height };
 }
 
-function colorCut(cut: AtlasCut, labels: AtlasLabel[]): HTMLCanvasElement {
+function colorCut(
+  cut: AtlasCut,
+  labels: AtlasLabel[],
+  mode: AtlasDisplayMode,
+): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
   canvas.width = cut.width;
   canvas.height = cut.height;
   const ctx = canvas.getContext("2d")!;
   const image = ctx.createImageData(cut.width, cut.height);
   for (let index = 0; index < cut.ids.length; index++) {
-    writeLabelColor(image.data, index, cut.ids[index], labels);
+    const labelId = cut.ids[index];
+    if (mode === "fill" || isBoundary(cut, index, labelId)) {
+      writeLabelColor(image.data, index, labelId, labels);
+    }
   }
   ctx.putImageData(image, 0, 0);
   return canvas;
+}
+
+function isBoundary(cut: AtlasCut, index: number, labelId: number) {
+  if (labelId === 0) return false;
+  const x = index % cut.width;
+  const y = Math.floor(index / cut.width);
+  return x === 0 || y === 0 || x === cut.width - 1 || y === cut.height - 1 ||
+    cut.ids[index - 1] !== labelId || cut.ids[index + 1] !== labelId ||
+    cut.ids[index - cut.width] !== labelId ||
+    cut.ids[index + cut.width] !== labelId;
 }
 
 function writeLabelColor(
@@ -366,11 +413,10 @@ function writeLabelColor(
 
 function warpCut(
   cut: AtlasCut,
-  labels: AtlasLabel[],
   markers: Marker[],
   registrationWidth = cut.width,
   registrationHeight = cut.height,
-): HTMLCanvasElement {
+): AtlasCut {
   const registeredWidth = Number.isFinite(registrationWidth) && registrationWidth > 0
     ? registrationWidth : cut.width;
   const registeredHeight = Number.isFinite(registrationHeight) && registrationHeight > 0
@@ -419,11 +465,7 @@ function warpCut(
     }
   }
 
-  const canvas = document.createElement("canvas");
-  canvas.width = cut.width;
-  canvas.height = cut.height;
-  const ctx = canvas.getContext("2d")!;
-  const image = ctx.createImageData(cut.width, cut.height);
+  const ids = new Uint16Array(cut.ids.length);
 
   for (const [ia, ib, ic] of triangles) {
     const a = destination[ia], b = destination[ib], c = destination[ic];
@@ -451,12 +493,11 @@ function warpCut(
           sourceY < 0 || sourceY >= cut.height
         ) continue;
         const labelId = cut.ids[sourceX + sourceY * cut.width];
-        writeLabelColor(image.data, x + y * cut.width, labelId, labels);
+        ids[x + y * cut.width] = labelId;
       }
     }
   }
-  ctx.putImageData(image, 0, 0);
-  return canvas;
+  return { ids, width: cut.width, height: cut.height };
 }
 
 function pointInCircumcircle(a: Point, b: Point, c: Point, point: Point) {

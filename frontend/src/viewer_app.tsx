@@ -3,9 +3,9 @@ import { useEffect, useRef } from "preact/hooks";
 import { useSignal } from "@preact/signals";
 import { DziViewer } from "./dzi_viewer";
 import { SegmentationOverlay } from "./seg_overlay";
-import { AtlasOverlay } from "./atlas_overlay";
+import { AtlasOverlay, type AtlasDisplayMode } from "./atlas_overlay";
 import { ApiClient } from "./api";
-import type { SourceEntry } from "./types";
+import type { OverlayBlendMode, SourceEntry } from "./types";
 
 /**
  * ViewerApp — clean overlay viewer
@@ -22,6 +22,14 @@ import type { SourceEntry } from "./types";
 function readParam(key: string) {
   return new URLSearchParams(window.location.search).get(key) ?? "";
 }
+
+const BLEND_MODES: Array<{ value: OverlayBlendMode; label: string }> = [
+  { value: "normal", label: "Normal" },
+  { value: "multiply", label: "Multiply" },
+  { value: "screen", label: "Screen" },
+  { value: "overlay", label: "Overlay" },
+  { value: "difference", label: "Difference" },
+];
 
 export function findSegmentationSource(
   sourceName: string,
@@ -66,11 +74,15 @@ export function ViewerApp() {
 
   const segVisible = useSignal(true);
   const segOpacity = useSignal(0.5);
+  const segBlendMode = useSignal<OverlayBlendMode>("normal");
   const segStatus  = useSignal<"none" | "loading" | "ready" | "error">("none");
   const segError   = useSignal("");
 
   const atlasVisible = useSignal(true);
   const atlasOpacity = useSignal(0.5);
+  const atlasBlendMode = useSignal<OverlayBlendMode>("normal");
+  const atlasDisplayMode = useSignal<AtlasDisplayMode>("fill");
+  const atlasSmoothEdges = useSignal(true);
   const atlasStatus = useSignal<"idle" | "loading" | "ready" | "error">("idle");
   const atlasProgress = useSignal("");
   const atlasError = useSignal("");
@@ -91,8 +103,12 @@ export function ViewerApp() {
   // Keep segmentation visibility / opacity in sync
   useEffect(() => segVisible.subscribe((v) => segRef.current?.setVisible(v)), []);
   useEffect(() => segOpacity.subscribe((o) => segRef.current?.setOpacity(o)), []);
+  useEffect(() => segBlendMode.subscribe((mode) => segRef.current?.setBlendMode(mode)), []);
   useEffect(() => atlasVisible.subscribe((v) => atlasRef.current?.setVisible(v)), []);
   useEffect(() => atlasOpacity.subscribe((o) => atlasRef.current?.setOpacity(o)), []);
+  useEffect(() => atlasBlendMode.subscribe((mode) => atlasRef.current?.setBlendMode(mode)), []);
+  useEffect(() => atlasDisplayMode.subscribe((mode) => atlasRef.current?.setDisplayMode(mode)), []);
+  useEffect(() => atlasSmoothEdges.subscribe((smooth) => atlasRef.current?.setSmoothEdges(smooth)), []);
 
   // Load source list on mount (or when workdir changes)
   useEffect(() => {
@@ -265,6 +281,21 @@ export function ViewerApp() {
                   />
                   <span class="muted">{Math.round(segOpacity.value * 100)}%</span>
                 </label>
+                <label class="viewer-toolbar-check">
+                  Blend
+                  <select
+                    class="viewer-select"
+                    value={segBlendMode.value}
+                    onChange={(event) =>
+                      (segBlendMode.value =
+                        (event.target as HTMLSelectElement).value as OverlayBlendMode)
+                    }
+                  >
+                    {BLEND_MODES.map((mode) => (
+                      <option value={mode.value}>{mode.label}</option>
+                    ))}
+                  </select>
+                </label>
               </>
             )}
           </div>
@@ -300,6 +331,20 @@ export function ViewerApp() {
             <>
               <span class="muted">{loadedAtlasName.value}</span>
               <label class="viewer-toolbar-check">
+                View
+                <select
+                  class="viewer-select"
+                  value={atlasDisplayMode.value}
+                  onChange={(event) =>
+                    (atlasDisplayMode.value =
+                      (event.target as HTMLSelectElement).value as AtlasDisplayMode)
+                  }
+                >
+                  <option value="fill">Filled</option>
+                  <option value="outline">Outline</option>
+                </select>
+              </label>
+              <label class="viewer-toolbar-check">
                 <input
                   type="checkbox"
                   checked={atlasVisible.value}
@@ -309,6 +354,17 @@ export function ViewerApp() {
                   }
                 />
                 Show atlas
+              </label>
+              <label class="viewer-toolbar-check">
+                <input
+                  type="checkbox"
+                  checked={atlasSmoothEdges.value}
+                  onChange={(event) =>
+                    (atlasSmoothEdges.value =
+                      (event.target as HTMLInputElement).checked)
+                  }
+                />
+                Smooth edges
               </label>
               <label class="viewer-toolbar-check">
                 Opacity
@@ -323,6 +379,21 @@ export function ViewerApp() {
                   style="width:80px"
                 />
                 <span class="muted">{Math.round(atlasOpacity.value * 100)}%</span>
+              </label>
+              <label class="viewer-toolbar-check">
+                Blend
+                <select
+                  class="viewer-select"
+                  value={atlasBlendMode.value}
+                  onChange={(event) =>
+                    (atlasBlendMode.value =
+                      (event.target as HTMLSelectElement).value as OverlayBlendMode)
+                  }
+                >
+                  {BLEND_MODES.map((mode) => (
+                    <option value={mode.value}>{mode.label}</option>
+                  ))}
+                </select>
               </label>
             </>
           )}

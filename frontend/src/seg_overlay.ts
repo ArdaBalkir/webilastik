@@ -1,6 +1,6 @@
 import netunzip, { NetUnzipDirectory } from "./dzip_helper";
 import type { DziViewer } from "./dzi_viewer";
-import type { DziMeta } from "./types";
+import type { DziMeta, OverlayBlendMode } from "./types";
 
 /**
  * SegmentationOverlay
@@ -139,6 +139,9 @@ export class SegmentationOverlay {
 
   setVisible(v: boolean) { this.visible = v; this.dirty = true; }
   setOpacity(o: number)  { this.opacity = o;  this.dirty = true; }
+  setBlendMode(mode: OverlayBlendMode) {
+    this.canvas.style.mixBlendMode = mode;
+  }
 
   destroy() {
     cancelAnimationFrame(this.rafId);

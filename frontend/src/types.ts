@@ -8,6 +8,14 @@ export interface DziMeta {
   maxLevel: number; // ceil(log2(max(width, height))) — full-resolution level index
 }
 
+/** CSS blend modes offered for independently composited viewer overlays. */
+export type OverlayBlendMode =
+  | "normal"
+  | "multiply"
+  | "screen"
+  | "overlay"
+  | "difference";
+
 // ── Project model (browser-owned, serialised to JSON) ────────────────────────
 export interface Label {
   id: number; // 1-based
