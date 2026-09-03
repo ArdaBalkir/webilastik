@@ -1,5 +1,4 @@
 import type { DziViewer } from "./dzi_viewer";
-import type { OverlayBlendMode } from "./types";
 
 interface AtlasLabel {
   rgb?: string;
@@ -60,7 +59,7 @@ export class AtlasOverlay {
   private visible = true;
   private opacity = 0.5;
   private displayMode: AtlasDisplayMode = "fill";
-  private smoothEdges = true;
+  private outlineColor = "#0000ff";
   private dirty = false;
   private rafId = 0;
 
@@ -157,13 +156,10 @@ export class AtlasOverlay {
     this.rebuildSliceCanvas();
   }
 
-  setSmoothEdges(smooth: boolean) {
-    this.smoothEdges = smooth;
-    this.dirty = true;
-  }
-
-  setBlendMode(mode: OverlayBlendMode) {
-    this.canvas.style.mixBlendMode = mode;
+  setOutlineColor(color: string) {
+    if (!/^#[0-9a-f]{6}$/i.test(color)) return;
+    this.outlineColor = color;
+    if (this.displayMode === "outline") this.rebuildSliceCanvas();
   }
 
   destroy() {
@@ -201,8 +197,7 @@ export class AtlasOverlay {
     const [canvasX, canvasY] = viewer.imageToCanvas(0, 0);
     ctx.save();
     ctx.globalAlpha = this.opacity;
-    ctx.imageSmoothingEnabled = this.smoothEdges;
-    if (this.smoothEdges) ctx.imageSmoothingQuality = "high";
+    ctx.imageSmoothingEnabled = false;
     ctx.drawImage(
       sliceCanvas,
       canvasX,
@@ -215,7 +210,12 @@ export class AtlasOverlay {
 
   private rebuildSliceCanvas() {
     this.sliceCanvas = this.renderedCut && this.atlas
-      ? colorCut(this.renderedCut, this.atlas.labels, this.displayMode)
+      ? colorCut(
+        this.renderedCut,
+        this.atlas.labels,
+        this.displayMode,
+        this.outlineColor,
+      )
       : null;
     this.dirty = true;
   }
@@ -368,30 +368,37 @@ function colorCut(
   cut: AtlasCut,
   labels: AtlasLabel[],
   mode: AtlasDisplayMode,
+  outlineColor: string,
 ): HTMLCanvasElement {
   const canvas = document.createElement("canvas");
   canvas.width = cut.width;
   canvas.height = cut.height;
   const ctx = canvas.getContext("2d")!;
   const image = ctx.createImageData(cut.width, cut.height);
-  for (let index = 0; index < cut.ids.length; index++) {
-    const labelId = cut.ids[index];
-    if (mode === "fill" || isBoundary(cut, index, labelId)) {
-      writeLabelColor(image.data, index, labelId, labels);
+  if (mode === "outline") {
+    const color = parseColor(outlineColor);
+    // Match WebWarp's thin outline: retain only a pixel whose label differs
+    // from its immediate left or upper neighbour. The first row/column stay
+    // transparent rather than becoming an artificial canvas border.
+    for (let y = 1; y < cut.height; y++) {
+      for (let x = 1; x < cut.width; x++) {
+        const index = x + y * cut.width;
+        const labelId = cut.ids[index];
+        if (
+          labelId !== cut.ids[index - 1] ||
+          labelId !== cut.ids[index - cut.width]
+        ) {
+          writeColor(image.data, index, color);
+        }
+      }
+    }
+  } else {
+    for (let index = 0; index < cut.ids.length; index++) {
+      writeLabelColor(image.data, index, cut.ids[index], labels);
     }
   }
   ctx.putImageData(image, 0, 0);
   return canvas;
-}
-
-function isBoundary(cut: AtlasCut, index: number, labelId: number) {
-  if (labelId === 0) return false;
-  const x = index % cut.width;
-  const y = Math.floor(index / cut.width);
-  return x === 0 || y === 0 || x === cut.width - 1 || y === cut.height - 1 ||
-    cut.ids[index - 1] !== labelId || cut.ids[index + 1] !== labelId ||
-    cut.ids[index - cut.width] !== labelId ||
-    cut.ids[index + cut.width] !== labelId;
 }
 
 function writeLabelColor(
@@ -403,7 +410,18 @@ function writeLabelColor(
   if (labelId === 0) return;
   const rgb = labels[labelId]?.rgb;
   if (!rgb) return;
-  const color = Number.parseInt(rgb.replace(/^#/, ""), 16);
+  writeColor(pixels, index, parseColor(rgb));
+}
+
+function parseColor(color: string) {
+  return Number.parseInt(color.replace(/^#/, ""), 16);
+}
+
+function writeColor(
+  pixels: Uint8ClampedArray,
+  index: number,
+  color: number,
+) {
   const offset = index * 4;
   pixels[offset] = color >> 16;
   pixels[offset + 1] = (color >> 8) & 255;

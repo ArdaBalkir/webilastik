@@ -80,9 +80,8 @@ export function ViewerApp() {
 
   const atlasVisible = useSignal(true);
   const atlasOpacity = useSignal(0.5);
-  const atlasBlendMode = useSignal<OverlayBlendMode>("normal");
   const atlasDisplayMode = useSignal<AtlasDisplayMode>("fill");
-  const atlasSmoothEdges = useSignal(true);
+  const atlasOutlineColor = useSignal("#0000ff");
   const atlasStatus = useSignal<"idle" | "loading" | "ready" | "error">("idle");
   const atlasProgress = useSignal("");
   const atlasError = useSignal("");
@@ -106,9 +105,8 @@ export function ViewerApp() {
   useEffect(() => segBlendMode.subscribe((mode) => segRef.current?.setBlendMode(mode)), []);
   useEffect(() => atlasVisible.subscribe((v) => atlasRef.current?.setVisible(v)), []);
   useEffect(() => atlasOpacity.subscribe((o) => atlasRef.current?.setOpacity(o)), []);
-  useEffect(() => atlasBlendMode.subscribe((mode) => atlasRef.current?.setBlendMode(mode)), []);
   useEffect(() => atlasDisplayMode.subscribe((mode) => atlasRef.current?.setDisplayMode(mode)), []);
-  useEffect(() => atlasSmoothEdges.subscribe((smooth) => atlasRef.current?.setSmoothEdges(smooth)), []);
+  useEffect(() => atlasOutlineColor.subscribe((color) => atlasRef.current?.setOutlineColor(color)), []);
 
   // Load source list on mount (or when workdir changes)
   useEffect(() => {
@@ -355,17 +353,20 @@ export function ViewerApp() {
                 />
                 Show atlas
               </label>
-              <label class="viewer-toolbar-check">
-                <input
-                  type="checkbox"
-                  checked={atlasSmoothEdges.value}
-                  onChange={(event) =>
-                    (atlasSmoothEdges.value =
-                      (event.target as HTMLInputElement).checked)
-                  }
-                />
-                Smooth edges
-              </label>
+              {atlasDisplayMode.value === "outline" && (
+                <label class="viewer-toolbar-check">
+                  Color
+                  <input
+                    type="color"
+                    value={atlasOutlineColor.value}
+                    onInput={(event) =>
+                      (atlasOutlineColor.value =
+                        (event.target as HTMLInputElement).value)
+                    }
+                    title="Atlas outline color"
+                  />
+                </label>
+              )}
               <label class="viewer-toolbar-check">
                 Opacity
                 <input
@@ -379,21 +380,6 @@ export function ViewerApp() {
                   style="width:80px"
                 />
                 <span class="muted">{Math.round(atlasOpacity.value * 100)}%</span>
-              </label>
-              <label class="viewer-toolbar-check">
-                Blend
-                <select
-                  class="viewer-select"
-                  value={atlasBlendMode.value}
-                  onChange={(event) =>
-                    (atlasBlendMode.value =
-                      (event.target as HTMLSelectElement).value as OverlayBlendMode)
-                  }
-                >
-                  {BLEND_MODES.map((mode) => (
-                    <option value={mode.value}>{mode.label}</option>
-                  ))}
-                </select>
               </label>
             </>
           )}
