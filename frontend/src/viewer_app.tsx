@@ -36,8 +36,10 @@ export function findSegmentationSource(
   candidates: SourceEntry[],
 ): SourceEntry | null {
   const stem = (name: string) => name.replace(/\.[^.]+$/, "").toLowerCase();
-  const sequence = (name: string) =>
-    name.match(/(?:^|_)(s\d{4})(?!\d)/i)?.[1].toLowerCase();
+  const sequence = (name: string): number | null => {
+    const match = name.match(/(?:^|_)s(\d+)(?!\d)/i);
+    return match ? Number.parseInt(match[1], 10) : null;
+  };
   const usable = candidates.filter(({ name }) =>
     /\.(?:d?zip|png|jpe?g|webp|gif|bmp|avif)$/i.test(name),
   );
@@ -45,7 +47,7 @@ export function findSegmentationSource(
   const sourceSequence = sequence(sourceName);
   return candidates.find(({ name }) => name === sourceName)
     ?? usable.find(({ name }) => stem(name) === sourceStem)
-    ?? usable.find(({ name }) => !!sourceSequence && sequence(name) === sourceSequence)
+    ?? usable.find(({ name }) => sourceSequence !== null && sequence(name) === sourceSequence)
     ?? null;
 }
 
