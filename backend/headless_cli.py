@@ -159,7 +159,7 @@ def _list_dzips(dir_url: str, token: Optional[str]) -> list[dict]:
     r = requests.get(
         endpoint,
         headers=headers,
-        params={"prefix": prefix, "delimiter": "/"},
+        params={"prefix": prefix, "delimiter": "/", "limit": 9999},
         timeout=30,
     )
     r.raise_for_status()

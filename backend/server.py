@@ -831,7 +831,7 @@ async def list_sources(
             bucket = m.group(1)
             prefix = m.group(2).lstrip("/")
             dp_url = f"{_DP_BASE}/buckets/{bucket}"
-            params: dict = {"prefix": prefix, "delimiter": "/"}
+            params: dict = {"prefix": prefix, "delimiter": "/", "limit": 9999}
             headers = {"Authorization": f"Bearer {token}"} if token else {}
             logger.info("[list-sources] GET %s prefix=%s", dp_url, prefix)
             r = _req.get(dp_url, headers=headers, params=params, timeout=20)
@@ -1222,7 +1222,7 @@ async def _run_batch(
             r = _req.get(
                 dp_url,
                 headers=headers,
-                params={"prefix": prefix, "delimiter": "/"},
+                params={"prefix": prefix, "delimiter": "/", "limit": 9999},
                 timeout=20,
             )
             r.raise_for_status()
