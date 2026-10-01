@@ -47,6 +47,8 @@ from PIL import Image
 from pydantic import BaseModel
 
 from .auth import verify_token, AuthError, get_user_id
+from .security import workspace_name, safe_output_name, validate_url
+from . import security as requests
 from .classifier import Classifier
 from .encoding import encode_prediction_png
 from .dzi_source import DzipSource
@@ -201,7 +203,7 @@ def _dp_normalize(url: str) -> str:
       https://data-proxy.ebrains.eu/{bucket}/{object}          (missing /api/v1/buckets)
       https://data-proxy.ebrains.eu/api/{bucket}/{object}      (missing v1/buckets)
     """
-    if not "data-proxy.ebrains.eu" in url:
+    if not requests.is_data_proxy(url):
         return url  # not a data-proxy URL, pass through
     # Already canonical
     if "/api/v1/buckets/" in url:
@@ -227,17 +229,18 @@ def _dp_put(url: str, data: bytes, token: str) -> int:
       2. PUT {presigned_s3_url}  (data, no auth)
     Returns the final HTTP status code.
     """
-    import requests as _req
+    from . import security as _req
     import time as _time
 
     canonical = _dp_normalize(url)
+    validate_url(canonical, proxy_only=True)
     logger.info("[dp_put] step-1 request pre-signed URL: %s", canonical)
     r1 = _req.put(
         canonical,
         headers={"Authorization": f"Bearer {token}"},
         timeout=30,
     )
-    logger.info("[dp_put] step-1 response: %d  body: %.200s", r1.status_code, r1.text)
+    logger.info("[dp_put] step-1 response: %d  body: %.200s", r1.status_code, "(redacted)")
     r1.raise_for_status()
     presigned = r1.json()["url"]
     logger.info("[dp_put] step-2 PUT %d bytes to S3 pre-signed URL", len(data))
@@ -258,6 +261,7 @@ def _build_prediction_dzip(
     authorization: Optional[str],
     job_id: Optional[str] = None,
     level: Optional[int] = None,
+    workspace: str = "dev-user",
 ) -> tuple[pathlib.Path, pathlib.Path]:
     """
     Predict every tile at the requested level (default: max_level = full res),
@@ -283,7 +287,7 @@ def _build_prediction_dzip(
     num_cols = math.ceil(lw / ts)
     num_rows = math.ceil(lh / ts)
     total = num_cols * num_rows
-    out_name = f"{dzi_name}_predictions"
+    out_name = safe_output_name(dzi_name)
 
     logger.info(
         "[build-dzip] %s — %d×%d tiles at level %d (scale %.4f)",
@@ -294,8 +298,15 @@ def _build_prediction_dzip(
         scale,
     )
 
-    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="webilastik_"))
+    if not _re.fullmatch(r"[a-zA-Z0-9_-]+", workspace):
+        raise ValueError("Invalid workspace name")
+    workspace_root = pathlib.Path(tempfile.gettempdir()) / "webilastik" / workspace
+    workspace_root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    tmpdir = pathlib.Path(tempfile.mkdtemp(prefix="export_", dir=workspace_root))
     tiles_dir = tmpdir / f"{out_name}_files" / str(level)
+    for output in (tiles_dir, tmpdir / f"{out_name}.dzi", tmpdir / f"{out_name}.dzip"):
+        if not output.resolve().is_relative_to(tmpdir.resolve()):
+            raise ValueError("Export path escapes its temporary directory")
     tiles_dir.mkdir(parents=True)
     logger.info("[build-dzip] tmpdir: %s", tmpdir)
 
@@ -517,6 +528,8 @@ async def save_project_to_proxy(
     Destination should follow the convention:
       …/buckets/{bucket}/ilastikProjectSaves/{filename}.json
     """
+    _auth(authorization)
+    validate_url(req.dest_url, proxy_only=True)
     token = None
     if authorization and authorization.lower().startswith("bearer "):
         token = authorization[7:].strip()
@@ -768,8 +781,8 @@ async def start_export(
     user = _auth(authorization)
     clf = _get_clf(req.classifier_id, get_user_id(user))
 
-    job_id = str(uuid.uuid4())
-    _exports[job_id] = {"status": "pending", "progress": 0.0}
+    job_id = workspace_name(user) + "-" + uuid.uuid4().hex
+    _exports[job_id] = {"status": "pending", "progress": 0.0, "user_id": get_user_id(user), "workspace": workspace_name(user)}
     logger.info(
         "[export-job %s] queued: output_url=%s dzip=%s level=%d",
         job_id,
@@ -786,9 +799,9 @@ async def export_status(
     job_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
-    _auth(authorization)
+    user = _auth(authorization)
     job = _exports.get(job_id)
-    if job is None:
+    if job is None or job.get("user_id") != get_user_id(user):
         raise HTTPException(status_code=404, detail="Export job not found")
     return job
 
@@ -809,7 +822,7 @@ async def list_sources(
       - data-proxy: https://data-proxy.ebrains.eu/api/v1/buckets/{bucket}/{prefix}/
       - plain HTTP directory listing (best-effort, HTML scrape)
     """
-    import requests as _req
+    from . import security as _req
 
     _auth(authorization)
 
@@ -873,8 +886,10 @@ async def start_batch_export(
     user = _auth(authorization)
     clf = _get_clf(req.classifier_id, get_user_id(user))
 
-    job_id = str(uuid.uuid4())
+    job_id = workspace_name(user) + "-" + uuid.uuid4().hex
     _batch_jobs[job_id] = {
+        "user_id": get_user_id(user),
+        "workspace": workspace_name(user),
         "status": "pending",
         "progress": 0.0,
         "total": 0,
@@ -896,9 +911,9 @@ async def batch_export_status(
     job_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
-    _auth(authorization)
+    user = _auth(authorization)
     job = _batch_jobs.get(job_id)
-    if job is None:
+    if job is None or job.get("user_id") != get_user_id(user):
         raise HTTPException(status_code=404, detail="Batch job not found")
     return job
 
@@ -1001,8 +1016,10 @@ async def headless_run(
         features=req.features,
         level=req.level,
     )
-    job_id = str(uuid.uuid4())
+    job_id = workspace_name(user) + "-" + uuid.uuid4().hex
     _batch_jobs[job_id] = {
+        "user_id": get_user_id(user),
+        "workspace": workspace_name(user),
         "status": "pending",
         "progress": 0.0,
         "total": 0,
@@ -1041,6 +1058,7 @@ async def export_zip(
             req.features,
             authorization,
             level=req.level,
+            workspace=workspace_name(user),
         )
         try:
             return dzip_path.read_bytes(), dzip_path.name
@@ -1064,9 +1082,9 @@ async def export_zip(
             logger.info(
                 "[export-zip] uploading %d bytes to: %s", len(zip_bytes), target
             )
-            if "data-proxy.ebrains.eu" in target and token:
+            if requests.is_data_proxy(target) and token:
                 return _dp_put(target, zip_bytes, token)
-            import requests as _req
+            from . import security as _req
 
             s = _req.Session()
             if token:
@@ -1123,7 +1141,7 @@ async def _run_export(
         )
 
         def _do():
-            import requests as _req
+            from . import security as _req
 
             tmpdir, dzip_path = _build_prediction_dzip(
                 req.dzip_url,
@@ -1133,6 +1151,7 @@ async def _run_export(
                 authorization,
                 job_id=job_id,
                 level=req.level,
+                workspace=_exports[job_id]["workspace"],
             )
             try:
                 zip_bytes = dzip_path.read_bytes()
@@ -1160,7 +1179,7 @@ async def _run_export(
                 )
                 _exports[job_id]["progress"] = 0.9
 
-                if "data-proxy.ebrains.eu" in target and token:
+                if _req.is_data_proxy(target) and token:
                     _dp_put(target, zip_bytes, token)
                 else:
                     s = _req.Session()
@@ -1197,7 +1216,7 @@ async def _run_batch(
     2. For each: _build_prediction_dzip → upload to req.output_dir/{name}
     3. Images are processed sequentially; tiles within each image are parallel.
     """
-    import requests as _req
+    from . import security as _req
 
     try:
         _batch_jobs[job_id]["status"] = "running"
@@ -1274,6 +1293,7 @@ async def _run_batch(
                         authorization,
                         job_id=None,  # don't clobber batch progress
                         level=req.level,
+                        workspace=_batch_jobs[job_id]["workspace"],
                     )
                     try:
                         return dzip_path.read_bytes(), dzip_path.name
@@ -1286,7 +1306,7 @@ async def _run_batch(
                     logger.info(
                         "[batch %s] uploading %d bytes → %s", job_id, len(data), target
                     )
-                    if "data-proxy.ebrains.eu" in target and token:
+                    if _req.is_data_proxy(target) and token:
                         _dp_put(target, data, token)
                     else:
                         s = _req.Session()

@@ -36,7 +36,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 import numpy as np
-import requests
+from . import security as requests
 
 
 def _load_project(path: str) -> dict:

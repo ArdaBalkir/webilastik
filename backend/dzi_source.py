@@ -15,7 +15,7 @@ from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-import requests
+from . import security as requests
 from PIL import Image
 
 
@@ -55,7 +55,7 @@ class DzipSource:
     ):
         self._bearer_token = bearer_token
         self._proxy_url = url  # original data-proxy URL (or plain URL)
-        self._is_data_proxy = bool(bearer_token and "data-proxy.ebrains.eu" in url)
+        self._is_data_proxy = bool(bearer_token and requests.is_data_proxy(url))
         self._auth_session = session or requests.Session()
         if bearer_token:
             self._auth_session.headers.update(
