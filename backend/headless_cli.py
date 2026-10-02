@@ -100,7 +100,9 @@ def _make_session(workers: int, token: Optional[str]) -> Any:
         pool_maxsize=pool_size,
         max_retries=3,
     )
-    s = requests.Session()
+    from .auth import DataProxySession
+
+    s = DataProxySession()
     s.mount("https://", adapter)
     s.mount("http://", adapter)
     if token:
@@ -126,11 +128,15 @@ def _dp_put(url: str, data: bytes, token: str) -> None:
     import requests
 
     canonical = _dp_normalize(url)
+    from .auth import is_data_proxy_url
+    if not is_data_proxy_url(canonical):
+        raise ValueError("Uploads require an HTTPS EBRAINS data-proxy URL")
     logger.info("  [upload] step-1 pre-sign: %s", canonical)
     r1 = requests.put(
         canonical,
         headers={"Authorization": f"Bearer {token}"},
         timeout=30,
+        allow_redirects=False,
     )
     r1.raise_for_status()
     presigned = r1.json()["url"]

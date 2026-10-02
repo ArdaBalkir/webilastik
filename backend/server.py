@@ -231,13 +231,17 @@ def _dp_put(url: str, data: bytes, token: str) -> int:
     import time as _time
 
     canonical = _dp_normalize(url)
+    from .auth import is_data_proxy_url
+    if not is_data_proxy_url(canonical):
+        raise ValueError("Uploads require an HTTPS EBRAINS data-proxy URL")
     logger.info("[dp_put] step-1 request pre-signed URL: %s", canonical)
     r1 = _req.put(
         canonical,
         headers={"Authorization": f"Bearer {token}"},
         timeout=30,
+        allow_redirects=False,
     )
-    logger.info("[dp_put] step-1 response: %d  body: %.200s", r1.status_code, r1.text)
+    logger.info("[dp_put] step-1 response: %d", r1.status_code)
     r1.raise_for_status()
     presigned = r1.json()["url"]
     logger.info("[dp_put] step-2 PUT %d bytes to S3 pre-signed URL", len(data))
@@ -753,7 +757,7 @@ async def predict_tile(
         content=png_bytes,
         media_type="image/png",
         headers={
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": "private, no-store",
             "ETag": f'"{classifier_id}-{level}-{tile_spec}"',
             "Access-Control-Allow-Origin": "*",
         },
@@ -769,7 +773,7 @@ async def start_export(
     clf = _get_clf(req.classifier_id, get_user_id(user))
 
     job_id = str(uuid.uuid4())
-    _exports[job_id] = {"status": "pending", "progress": 0.0}
+    _exports[job_id] = {"status": "pending", "progress": 0.0, "user_id": get_user_id(user)}
     logger.info(
         "[export-job %s] queued: output_url=%s dzip=%s level=%d",
         job_id,
@@ -786,9 +790,9 @@ async def export_status(
     job_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
-    _auth(authorization)
+    user_id = get_user_id(_auth(authorization))
     job = _exports.get(job_id)
-    if job is None:
+    if job is None or job["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Export job not found")
     return job
 
@@ -875,6 +879,7 @@ async def start_batch_export(
 
     job_id = str(uuid.uuid4())
     _batch_jobs[job_id] = {
+        "user_id": get_user_id(user),
         "status": "pending",
         "progress": 0.0,
         "total": 0,
@@ -896,9 +901,9 @@ async def batch_export_status(
     job_id: str,
     authorization: Optional[str] = Header(default=None),
 ):
-    _auth(authorization)
+    user_id = get_user_id(_auth(authorization))
     job = _batch_jobs.get(job_id)
-    if job is None:
+    if job is None or job["user_id"] != user_id:
         raise HTTPException(status_code=404, detail="Batch job not found")
     return job
 
@@ -1003,6 +1008,7 @@ async def headless_run(
     )
     job_id = str(uuid.uuid4())
     _batch_jobs[job_id] = {
+        "user_id": get_user_id(user),
         "status": "pending",
         "progress": 0.0,
         "total": 0,

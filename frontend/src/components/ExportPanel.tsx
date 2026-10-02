@@ -240,6 +240,8 @@ export function ExportPanel() {
         slurm_job_id: res.slurm_job_id,
         slurm_state: res.slurm_state,
         status: res.status,
+        user_id: res.user_id,
+        training_sources: res.training_sources,
         p_source: res.p_source,
         output_dir: res.output_dir,
         log_path: res.log_path,
@@ -451,6 +453,8 @@ export function ExportPanel() {
                   <div class="row" style={{ justifyContent: "space-between" }}>
                     <span>{STATUS_ICON[r.status] ?? "?"} SLURM {r.slurm_job_id}</span>
                     <span class="hint">{fmtDate(r.created_at)}</span>
+                    <span class="hint">User: {r.user_id ?? "Unknown (older job)"}</span>
+                    <span class="hint">Source: {r.p_source}</span>
                   </div>
                   <span class="hint">{r.annotated_images} img · {r.slurm_state}</span>
                   <button

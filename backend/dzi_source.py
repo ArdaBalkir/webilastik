@@ -18,6 +18,8 @@ import numpy as np
 import requests
 from PIL import Image
 
+from .auth import DataProxySession, is_data_proxy_url
+
 
 @dataclass
 class _ZipEntry:
@@ -55,9 +57,9 @@ class DzipSource:
     ):
         self._bearer_token = bearer_token
         self._proxy_url = url  # original data-proxy URL (or plain URL)
-        self._is_data_proxy = bool(bearer_token and "data-proxy.ebrains.eu" in url)
-        self._auth_session = session or requests.Session()
-        if bearer_token:
+        self._is_data_proxy = bool(bearer_token and is_data_proxy_url(url))
+        self._auth_session = session or DataProxySession()
+        if bearer_token and is_data_proxy_url(url):
             self._auth_session.headers.update(
                 {"Authorization": f"Bearer {bearer_token}"}
             )

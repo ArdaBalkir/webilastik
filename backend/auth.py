@@ -9,6 +9,7 @@ success; raises AuthError on any failure.
 from __future__ import annotations
 
 import logging
+from urllib.parse import urlsplit
 import time
 from typing import Any, Dict, Optional
 
@@ -67,7 +68,7 @@ def verify_token(authorization_header: Optional[str]) -> Dict[str, Any]:
             signing_key.key,
             algorithms=["RS256"],
             issuer=EXPECTED_ISSUER,
-            options={"verify_aud": False},  # audience varies by client
+            options={"verify_aud": False, "require": ["exp", "iss", "sub"]},
         )
         return payload
     except jwt.ExpiredSignatureError as e:
@@ -81,6 +82,29 @@ def verify_token(authorization_header: Optional[str]) -> Dict[str, Any]:
 def get_user_id(payload: Dict[str, Any]) -> str:
     """Extract the EBRAINS user ID (subject) from a verified JWT payload."""
     sub = payload.get("sub")
-    if not sub:
+    if not isinstance(sub, str) or not sub.strip():
         raise AuthError("JWT payload missing 'sub' claim")
     return str(sub)
+
+
+def is_data_proxy_url(url: str) -> bool:
+    """Credentials are scoped to the exact HTTPS data-proxy origin."""
+    try:
+        parsed = urlsplit(url)
+        return (
+            parsed.scheme == "https"
+            and parsed.hostname == "data-proxy.ebrains.eu"
+            and parsed.port in (None, 443)
+            and parsed.username is None and parsed.password is None
+        )
+    except ValueError:
+        return False
+
+
+class DataProxySession(requests.Session):
+    """Never send EBRAINS credentials to another origin, including redirects."""
+
+    def send(self, request, **kwargs):
+        if not is_data_proxy_url(request.url):
+            request.headers.pop("Authorization", None)
+        return super().send(request, **kwargs)

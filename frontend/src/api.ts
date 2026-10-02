@@ -196,6 +196,8 @@ export interface HpcJobRequest {
 }
 
 export interface HpcJobStatus {
+  user_id?: string;
+  training_sources?: string[];
   job_id: string;
   slurm_job_id: string;
   slurm_state: string;
@@ -282,7 +284,8 @@ export class SessionAllocatorClient {
       headers: this.headers(),
     });
     if (!res.ok) throw new Error(`Get job failed: ${res.status}`);
-    return res.json();
+    const job = await res.json();
+    return { ...job, created_at: job.created_at * 1000 };
   }
 
   async getJobLog(jobId: string, tail = 80): Promise<string> {
@@ -296,10 +299,11 @@ export class SessionAllocatorClient {
   }
 
   async cancelHeadlessJob(jobId: string): Promise<void> {
-    await fetch(`${this.baseUrl}/headless-jobs/${jobId}`, {
+    const res = await fetch(`${this.baseUrl}/headless-jobs/${jobId}`, {
       method: "DELETE",
       headers: this.headers(),
     });
+    if (!res.ok) throw new Error(`Cancel job failed: ${res.status}`);
   }
 
   /** Returns true if the allocator is reachable. */
