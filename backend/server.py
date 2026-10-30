@@ -239,8 +239,9 @@ def _dp_put(url: str, data: bytes, token: str) -> int:
         canonical,
         headers={"Authorization": f"Bearer {token}"},
         timeout=30,
+        allow_redirects=False,
     )
-    logger.info("[dp_put] step-1 response: %d  body: %.200s", r1.status_code, "(redacted)")
+    logger.info("[dp_put] step-1 response: %d", r1.status_code)
     r1.raise_for_status()
     presigned = r1.json()["url"]
     logger.info("[dp_put] step-2 PUT %d bytes to S3 pre-signed URL", len(data))
@@ -766,7 +767,7 @@ async def predict_tile(
         content=png_bytes,
         media_type="image/png",
         headers={
-            "Cache-Control": "public, max-age=3600",
+            "Cache-Control": "private, no-store",
             "ETag": f'"{classifier_id}-{level}-{tile_spec}"',
             "Access-Control-Allow-Origin": "*",
         },

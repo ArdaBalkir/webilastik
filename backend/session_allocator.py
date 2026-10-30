@@ -47,13 +47,13 @@ import hashlib
 import json
 import logging
 import os
+import re
+import shlex
 import time
 import uuid
-import shlex
-import re
 from typing import Dict, List, Optional
 
-from fastapi import FastAPI, HTTPException, Header
+from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -173,12 +173,18 @@ def _build_sbatch_script(
     token: Optional[str],
     cpus: int,
     cache_namespace: str,
+    user_id: str = "dev-user",
+    training_sources: Optional[List[str]] = None,
     workspace: str = "dev-user",
 ) -> str:
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", workspace) or not re.fullmatch(r"[a-zA-Z0-9_-]+", job_id):
         raise ValueError("Invalid workspace or job identifier")
     if not re.fullmatch(r"[a-zA-Z0-9_/-]+", cache_namespace) or ".." in cache_namespace:
         raise ValueError("Invalid cache namespace")
+    provenance = shlex.quote(json.dumps({
+        "job_id": job_id, "user_id": user_id,
+        "p_source": p_source, "training_sources": training_sources or [],
+    }, ensure_ascii=True))
     level_flag = f"--level {level}" if level is not None else ""
     t_source_flag = f"--t-source {shlex.quote(t_source)}" if t_source else ""
     token_export = f"export WI2_TOKEN={shlex.quote(token)}" if token else "# no token"
@@ -224,6 +230,7 @@ echo "[wi2] Job {job_id} starting on $(hostname) at $(date)"
 echo "[wi2] SLURM CPUs: $SLURM_CPUS_PER_TASK"
 printf '%s\\n' {shlex.quote("[wi2] p_source: " + p_source)}
 printf '%s\\n' {shlex.quote("[wi2] output_dir: " + output_dir)}
+printf '%s\\n' {provenance}
 echo "[wi2] =================================================="
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
@@ -246,7 +253,7 @@ exit $EXIT_CODE
 
 # ── SLURM status via sacct ────────────────────────────────────────────────────
 
-_SACCT_DONE_OK = frozenset(["COMPLETED", "COMPLETING"])
+_SACCT_DONE_OK = frozenset(["COMPLETED"])
 _SACCT_FAILED = frozenset(
     [
         "FAILED",
@@ -295,7 +302,7 @@ async def _get_slurm_state(slurm_job_id: str) -> str:
 
 
 def _map_state(slurm_state: str) -> str:
-    if slurm_state == "RUNNING":
+    if slurm_state in ("RUNNING", "COMPLETING"):
         return "running"
     if slurm_state in _SACCT_DONE_OK:
         return "done"
@@ -332,7 +339,7 @@ class HeadlessJobRequest(BaseModel):
     level: Optional[int] = None
     p_source: str
     output_dir: str
-    cpus: Optional[int] = Field(default=None, ge=1, le=128)  # override worker count, default 128
+    cpus: Optional[int] = Field(default=None, ge=1, le=HPC_CPUS)  # override worker count, default 128
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -360,6 +367,10 @@ async def create_headless_job(
         if annotation.get("dzip_url"):
             validate_url(annotation["dzip_url"])
     token = _raw_token(authorization)
+    training_sources = sorted({s.strip() for s in req.t_source.split(",") if s.strip()} if req.t_source else {
+        ann["dzip_url"] for ann in req.annotations
+        if isinstance(ann.get("dzip_url"), str)
+    })
     job_id = workspace + "-" + uuid.uuid4().hex
 
     ann_b64 = base64.b64encode(
@@ -381,6 +392,8 @@ async def create_headless_job(
         cpus=req.cpus or HPC_CPUS,
         cache_namespace=_cache_namespace(user_id, req.p_source),
         workspace=workspace,
+        user_id=user_id,
+        training_sources=training_sources,
     )
 
     try:
@@ -391,7 +404,7 @@ async def create_headless_job(
         raise HTTPException(500, f"sbatch submission failed: {e}")
 
     slurm_job_id = raw.split(";")[0].strip()
-    if not slurm_job_id.isdigit():
+    if not re.fullmatch(r"[0-9]+", slurm_job_id):
         raise HTTPException(502, "Invalid scheduler response")
     log_path = f"/p/scratch/ebrains-0000003/wi2_users/{workspace}/logs/wi2-run-{slurm_job_id}.log"
     logger.info("Job %s → SLURM %s (user %s)", job_id, slurm_job_id, user_id)
@@ -404,16 +417,12 @@ async def create_headless_job(
         "slurm_state": "PENDING",
         "status": "pending",
         "p_source": req.p_source,
+        "training_sources": training_sources,
         "output_dir": req.output_dir,
         "log_path": log_path,
         "created_at": time.time(),
     }
-    return {
-        "job_id": job_id,
-        "slurm_job_id": slurm_job_id,
-        "status": "pending",
-        "log_path": log_path,
-    }
+    return _jobs[job_id]
 
 
 @app.get("/headless-jobs")
@@ -452,6 +461,7 @@ async def cancel_headless_job(
         await _ssh_run(f"scancel {job['slurm_job_id']}")
     except Exception as e:
         logger.warning("scancel failed: %s", e)
+        raise HTTPException(502, "Scheduler cancellation failed") from e
     job["status"] = "cancelled"
     return {"cancelled": job_id}
 
@@ -459,7 +469,7 @@ async def cancel_headless_job(
 @app.get("/headless-jobs/{job_id}/log")
 async def get_job_log(
     job_id: str,
-    tail: int = 100,
+    tail: int = Query(default=100, ge=1, le=1000),
     authorization: Optional[str] = Header(default=None),
 ):
     """Tail the SLURM job log over SSH."""

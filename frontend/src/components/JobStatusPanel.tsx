@@ -94,6 +94,11 @@ function JobCard({ job }: { job: HpcJobRecord }) {
         )}
       </div>
 
+      <div class="hint">User: {job.user_id ?? "Unknown (older job)"}</div>
+      <div class="hint">Source: {job.p_source}</div>
+      {job.training_sources?.map((source) => (
+        <div class="hint" key={source}>Training: {source}</div>
+      ))}
       <button class="btn-sm" onClick={() => { showLog.value = !showLog.value; }}>
         {showLog.value ? "Hide log ▲" : "Show log ▼"}
       </button>
@@ -166,6 +171,7 @@ export function JobStatusPanel() {
             <div key={r.job_id} class={`job-hist-row job-${r.status}`}>
               <span class="job-badge job-badge-sm">{statusLabel(r.status)}</span>
               <span class="job-slurm">#{r.slurm_job_id}</span>
+              <span class="hint">User: {r.user_id ?? "Unknown (older job)"} · Source: {r.p_source}</span>
               <span class="job-time">
                 {formatJobDateTime(r.created_at)}
               </span>

@@ -152,6 +152,8 @@ export interface BatchExportStatus {
 
 // ── HPC job history record (stored in localStorage) ──────────────────────────
 export interface HpcJobRecord {
+  user_id?: string;
+  training_sources?: string[];
   job_id: string;
   slurm_job_id: string;
   slurm_state: string;

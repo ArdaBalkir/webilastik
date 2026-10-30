@@ -1,4 +1,4 @@
-#!/bin/bash -x
+#!/bin/bash
 #SBATCH --account=ebrains-0000003
 #SBATCH --partition=batch
 #SBATCH --nodes=1
