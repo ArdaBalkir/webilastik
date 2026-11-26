@@ -51,7 +51,7 @@ import re
 import shlex
 import time
 import uuid
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -77,6 +77,13 @@ HPC_USER = os.environ.get("HPC_USER", "")
 HPC_SSH_KEY = os.environ.get("HPC_SSH_KEY", os.path.expanduser("~/.ssh/id_rsa"))
 HPC_SSH_PORT = 22
 HPC_CPUS = 128  # default workers; overridable per-request
+
+# GPU-first by default: JUSUF "gpus" nodes (1x V100 16 GB, 128 cores) are
+# billed per node like "batch" nodes, so the GPU comes at no extra cost.
+# Set WI2_HPC_DEVICE=cpu to restore CPU-only jobs.
+HPC_DEFAULT_DEVICE = os.environ.get("WI2_HPC_DEVICE", "auto")
+HPC_CPU_ENV = os.environ.get("WI2_HPC_CPU_ENV", "webilastik2")
+HPC_GPU_ENV = os.environ.get("WI2_HPC_GPU_ENV", "webilastik2-gpu")
 
 # ── In-memory job registry ────────────────────────────────────────────────────
 _jobs: Dict[str, dict] = {}
@@ -176,11 +183,47 @@ def _build_sbatch_script(
     user_id: str = "dev-user",
     training_sources: Optional[List[str]] = None,
     workspace: str = "dev-user",
+    device: str = "cpu",
 ) -> str:
+    """
+    device="cpu": batch partition, CPU pipeline (as before).
+    device="gpu": gpus partition; runs with --device gpu in the GPU conda env
+    and, if that env/GPU is unusable or fails (exit 3), reruns on the same node
+    with the CPU pipeline. The prefetch cache makes the rerun cheap.
+    """
     if not re.fullmatch(r"[a-zA-Z0-9_-]+", workspace) or not re.fullmatch(r"[a-zA-Z0-9_-]+", job_id):
         raise ValueError("Invalid workspace or job identifier")
     if not re.fullmatch(r"[a-zA-Z0-9_/-]+", cache_namespace) or ".." in cache_namespace:
         raise ValueError("Invalid cache namespace")
+    if device not in ("cpu", "gpu"):
+        raise ValueError("device must be cpu or gpu")
+    partition_lines = (
+        "#SBATCH --partition=gpus\n#SBATCH --gres=gpu:1"
+        if device == "gpu"
+        else "#SBATCH --partition=batch"
+    )
+    cpu_env = shlex.quote(HPC_CPU_ENV)
+    gpu_env = shlex.quote(HPC_GPU_ENV)
+    if device == "gpu":
+        run_block = f"""EXIT_CODE=3
+if conda activate {gpu_env}; then
+    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \\
+        | sed 's/^/[wi2] GPU: /' || echo "[wi2] nvidia-smi failed"
+    _wi2_run gpu
+    EXIT_CODE=$?
+else
+    echo "[wi2] conda env {HPC_GPU_ENV} not available"
+fi
+if [ "$EXIT_CODE" -eq 3 ]; then
+    echo "[wi2] GPU path unusable — falling back to CPU on this node at $(date)"
+    conda activate {cpu_env}
+    _wi2_run cpu
+    EXIT_CODE=$?
+fi"""
+    else:
+        run_block = f"""conda activate {cpu_env}
+_wi2_run cpu
+EXIT_CODE=$?"""
     provenance = shlex.quote(json.dumps({
         "job_id": job_id, "user_id": user_id,
         "p_source": p_source, "training_sources": training_sources or [],
@@ -193,7 +236,7 @@ def _build_sbatch_script(
 
     return f"""#!/bin/bash
 #SBATCH --job-name=wi2-run
-#SBATCH --partition=batch
+{partition_lines}
 #SBATCH --account=ebrains-0000003
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
@@ -209,7 +252,6 @@ umask 077
 
 # ── Environment ───────────────────────────────────────────────────────────────
 source /p/project1/ebrains-0000003/miniforge3/etc/profile.d/conda.sh
-conda activate webilastik2
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/p/project1/ebrains-0000003/webilastik
@@ -228,24 +270,32 @@ trap 'rm -f "$_ANN"' EXIT
 echo "[wi2] =================================================="
 echo "[wi2] Job {job_id} starting on $(hostname) at $(date)"
 echo "[wi2] SLURM CPUs: $SLURM_CPUS_PER_TASK"
+echo "[wi2] Partition: $SLURM_JOB_PARTITION (requested device: {device})"
 printf '%s\\n' {shlex.quote("[wi2] p_source: " + p_source)}
 printf '%s\\n' {shlex.quote("[wi2] output_dir: " + output_dir)}
 printf '%s\\n' {provenance}
 echo "[wi2] =================================================="
 
-srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
-    python -m backend.headless_cli run \\
-        --annotations "$_ANN" \\
-        {t_source_flag} \\
-        --p-source {shlex.quote(p_source)} \\
-        --output-dir {shlex.quote(output_dir)} \\
-        --features {shlex.quote(features_json)} \\
-        {level_flag} \\
-        {token_flag} \\
-        --prefetch-dir /p/scratch/ebrains-0000003/wi2_users/{workspace}/cache/{cache_namespace} \\
-        --workers $SLURM_CPUS_PER_TASK
+_wi2_run() {{
+    srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
+        python -m backend.headless_cli run \\
+            --annotations "$_ANN" \\
+            {t_source_flag} \\
+            --p-source {shlex.quote(p_source)} \\
+            --output-dir {shlex.quote(output_dir)} \\
+            --features {shlex.quote(features_json)} \\
+            {level_flag} \\
+            {token_flag} \\
+            --prefetch-dir /p/scratch/ebrains-0000003/wi2_users/{workspace}/cache/{cache_namespace} \\
+            --workers $SLURM_CPUS_PER_TASK \\
+            --device "$1"
+}}
 
-EXIT_CODE=$?
+# Exit codes are handled explicitly below, and conda activation scripts
+# (CUDA packages especially) are not safe under nounset.
+set +eu
+{run_block}
+
 echo "[wi2] Pipeline finished with exit code $EXIT_CODE at $(date)"
 exit $EXIT_CODE
 """
@@ -340,6 +390,8 @@ class HeadlessJobRequest(BaseModel):
     p_source: str
     output_dir: str
     cpus: Optional[int] = Field(default=None, ge=1, le=HPC_CPUS)  # override worker count, default 128
+    # auto: GPU node first, CPU fallback (in-job, and on submission failure); cpu: batch only
+    device: Literal["auto", "cpu"] = HPC_DEFAULT_DEVICE  # type: ignore[assignment]
 
 
 # ── Routes ────────────────────────────────────────────────────────────────────
@@ -380,28 +432,49 @@ async def create_headless_job(
 
     # Use SLURM's %j placeholder so the log file name contains the real job ID.
     # We resolve the actual path after sbatch returns the numeric job ID.
-    script = _build_sbatch_script(
-        job_id=job_id,
-        annotations_b64=ann_b64,
-        t_source=req.t_source,
-        p_source=req.p_source,
-        output_dir=req.output_dir,
-        features_json=features_json,
-        level=req.level,
-        token=token,
-        cpus=req.cpus or HPC_CPUS,
-        cache_namespace=_cache_namespace(user_id, req.p_source),
-        workspace=workspace,
-        user_id=user_id,
-        training_sources=training_sources,
-    )
+    def script_for(device: str) -> str:
+        return _build_sbatch_script(
+            job_id=job_id,
+            annotations_b64=ann_b64,
+            t_source=req.t_source,
+            p_source=req.p_source,
+            output_dir=req.output_dir,
+            features_json=features_json,
+            level=req.level,
+            token=token,
+            cpus=req.cpus or HPC_CPUS,
+            cache_namespace=_cache_namespace(user_id, req.p_source),
+            workspace=workspace,
+            user_id=user_id,
+            training_sources=training_sources,
+            device=device,
+        )
 
+    # GPU first; if the scheduler rejects it (no access to "gpus", budget,
+    # partition down) submit the CPU job instead. Runtime GPU problems are
+    # handled inside the job script itself.
     try:
         await _ssh_run(f"umask 077; mkdir -p /p/scratch/ebrains-0000003/wi2_users/{workspace}/logs")
-        raw = await _ssh_run("sbatch --parsable", stdin=script)
     except RuntimeError as e:
-        logger.error("sbatch failed for job %s: %s", job_id, e)
+        logger.error("workspace setup failed for job %s: %s", job_id, e)
         raise HTTPException(500, f"sbatch submission failed: {e}")
+
+    attempts = ["gpu", "cpu"] if req.device == "auto" else ["cpu"]
+    raw = ""
+    device = attempts[0]
+    for i, device in enumerate(attempts):
+        try:
+            raw = await _ssh_run("sbatch --parsable", stdin=script_for(device))
+            break
+        except RuntimeError as e:
+            if i + 1 < len(attempts):
+                logger.warning(
+                    "sbatch on %s failed for job %s, falling back to CPU: %s",
+                    device, job_id, e,
+                )
+                continue
+            logger.error("sbatch failed for job %s: %s", job_id, e)
+            raise HTTPException(500, f"sbatch submission failed: {e}")
 
     slurm_job_id = raw.split(";")[0].strip()
     if not re.fullmatch(r"[0-9]+", slurm_job_id):
@@ -414,6 +487,7 @@ async def create_headless_job(
         "user_id": user_id,
         "workspace": workspace,
         "slurm_job_id": slurm_job_id,
+        "partition": "gpus" if device == "gpu" else "batch",
         "slurm_state": "PENDING",
         "status": "pending",
         "p_source": req.p_source,

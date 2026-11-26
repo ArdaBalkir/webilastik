@@ -22,16 +22,16 @@ logger = logging.getLogger(__name__)
 _GPU_AVAILABLE = False
 try:
     from cuml.ensemble import RandomForestClassifier as _CuRF  # type: ignore
-    import cudf  # type: ignore
 
     _GPU_AVAILABLE = True
     logger.info("cuML RandomForest available — GPU acceleration enabled")
 except ImportError:
     _CuRF = None  # type: ignore
-    cudf = None  # type: ignore
     logger.info("cuML not found — using scikit-learn CPU backend")
 
 from sklearn.ensemble import RandomForestClassifier as _SkRF
+
+from . import device as _device
 
 
 class Classifier:
@@ -54,7 +54,9 @@ class Classifier:
     ):
         self.n_estimators = n_estimators
         self.max_depth = max_depth
-        self.use_gpu = _GPU_AVAILABLE and not force_cpu
+        self.use_gpu = _device.use_gpu_classifier(_GPU_AVAILABLE) and not force_cpu
+        if self.use_gpu and not _GPU_AVAILABLE:
+            raise RuntimeError("GPU classifier selected but cuML is not importable")
         self.n_classes: int = 0
         self.classes_: Optional[np.ndarray] = None
         self._clf: object = None
@@ -74,14 +76,17 @@ class Classifier:
         self.n_classes = len(self.classes_)
 
         if self.use_gpu:
+            import cupy  # type: ignore
+
             self._clf = _CuRF(
                 n_estimators=self.n_estimators,
                 max_depth=self.max_depth,
                 n_streams=4,  # parallel tree building on GPU
             )
-            X_gpu = cudf.DataFrame(X)
-            y_gpu = cudf.Series(y)
-            self._clf.fit(X_gpu, y_gpu)
+            # cuML needs labels 0..n_classes-1; predict_proba columns then follow
+            # classes_ order, the same as sklearn.
+            y_idx = np.searchsorted(self.classes_, y).astype(np.int32)
+            self._clf.fit(cupy.asarray(X), cupy.asarray(y_idx))
             logger.debug(
                 "GPU RF trained: %d trees, %d samples, %d features",
                 self.n_estimators,
@@ -116,14 +121,26 @@ class Classifier:
         """
         if self._clf is None:
             raise RuntimeError("Classifier has not been trained yet")
-        X = X.astype(np.float32)
 
         if self.use_gpu:
-            X_gpu = cudf.DataFrame(X)
-            proba = self._clf.predict_proba(X_gpu)
-            return np.asarray(proba, dtype=np.float32)
+            import cupy  # type: ignore
+
+            proba = self.predict_proba_device(cupy.asarray(X, dtype=cupy.float32))
+            return cupy.asnumpy(proba)
         else:
+            X = np.asarray(X, dtype=np.float32)
             return self._clf.predict_proba(X).astype(np.float32)
+
+    def predict_proba_device(self, X_gpu):
+        """GPU only: CuPy (N, F) in, CuPy (N, n_classes) float32 out, no host copy."""
+        import cupy  # type: ignore
+
+        if not self.use_gpu:
+            raise RuntimeError("predict_proba_device needs a GPU-trained classifier")
+        proba = self._clf.predict_proba(X_gpu)
+        if hasattr(proba, "to_cupy"):  # cudf output
+            proba = proba.to_cupy()
+        return cupy.asarray(proba, dtype=cupy.float32)
 
     @property
     def is_trained(self) -> bool:
