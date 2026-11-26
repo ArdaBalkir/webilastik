@@ -92,6 +92,24 @@ class PresignedStorage(unittest.TestCase):
         for _, _, _, headers in storage:  # bearer token never leaves the proxy
             self.assertIsNone(headers.get("Authorization"))
 
+    def test_viewer_flow_dzi_info_train_then_predict(self):
+        with patch.object(server, "_auth", return_value={"sub": "viewer"}):
+            info = asyncio.run(server.dzi_info(PROXY_URL, "Bearer tok"))
+            self.assertEqual((info["name"], info["maxLevel"]), ("img", 6))
+            req = server.TrainMultiRequest(
+                annotations=[{"dzip_url": PROXY_URL, "strokes": [
+                    {"label": 1, "points": [[1, 1], [2, 2]]},
+                    {"label": 2, "points": [[50, 50], [60, 60]]}]}],
+                features={"filters": ["gaussianSmoothing"], "scales": [1.0]})
+            trained = asyncio.run(server.train_multi(req, "Bearer tok"))
+            resp = asyncio.run(server.predict_tile(
+                trained.classifier_id, 6, "0_0", PROXY_URL, "img",
+                "gaussianSmoothing", "1.0", token="tok", authorization=None))
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.media_type, "image/png")
+        png = Image.open(io.BytesIO(resp.body))
+        self.assertEqual(png.size, (64, 64))
+
     def test_upload_puts_to_presigned_storage(self):
         self.assertEqual(server._dp_put(PROXY_URL, b"data", "tok"), 201)
 
