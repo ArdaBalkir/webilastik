@@ -15,14 +15,21 @@ def is_data_proxy(url):
     return urlsplit(url).hostname == DATA_PROXY_HOST
 
 
-def validate_url(url, proxy_only=False):
+def validate_url(url, proxy_only=False, issued_by_proxy=False):
+    """
+    issued_by_proxy: the URL is a pre-signed link the data-proxy itself returned
+    (its storage backend lives on another host). That host needs no allowlist
+    entry because the proxy, not the user, chose it; all other checks apply.
+    """
     parsed = urlsplit(url)
     host = parsed.hostname
     allowed = {DATA_PROXY_HOST}
     allowed.update(h.strip().lower() for h in os.getenv("WI2_ALLOWED_HTTP_HOSTS", "").split(",") if h.strip())
     if parsed.scheme != "https" or not host or parsed.username or parsed.password or parsed.port not in (None, 443):
         raise ValueError("Outbound URLs must use HTTPS without credentials or custom ports")
-    if host not in allowed or (proxy_only and host != DATA_PROXY_HOST):
+    if proxy_only and host != DATA_PROXY_HOST:
+        raise ValueError("Outbound hostname is not approved")
+    if host not in allowed and not issued_by_proxy:
         raise ValueError("Outbound hostname is not approved")
     addresses = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     if not addresses or any(not ipaddress.ip_address(a[4][0]).is_global for a in addresses):
@@ -31,13 +38,15 @@ def validate_url(url, proxy_only=False):
 
 
 class Session(requests.Session):
+    _issued_by_proxy = False
+
     def __init__(self):
         super().__init__()
         # Ignore ambient proxy/netrc settings, which can alter routing/auth.
         self.trust_env = False
 
     def request(self, method, url, **kwargs):
-        validate_url(url)
+        validate_url(url, issued_by_proxy=self._issued_by_proxy)
         # Never follow redirects to an unchecked destination.
         kwargs["allow_redirects"] = False
         headers = dict(self.headers)
@@ -51,6 +60,19 @@ class Session(requests.Session):
             response.close()
             raise ValueError("Outbound redirects are disabled; use the canonical URL")
         return response
+
+
+class PresignedSession(Session):
+    """For pre-signed storage URLs the data-proxy returned. Sends no auth (the
+    host isn't the proxy), follows no redirects, still needs HTTPS to a public
+    address."""
+
+    _issued_by_proxy = True
+
+
+def put_presigned(url, **kwargs):
+    with PresignedSession() as session:
+        return session.put(url, **kwargs)
 
 
 def get(url, **kwargs):

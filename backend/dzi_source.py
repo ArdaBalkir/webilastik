@@ -94,7 +94,7 @@ class DzipSource:
                 data.get("url") or data.get("URL") or next(iter(data.values()), None)
             )
             if isinstance(pre_signed, str) and pre_signed.startswith("http"):
-                return pre_signed, requests.Session()  # S3 — no auth needed
+                return pre_signed, requests.PresignedSession()  # S3 — no auth needed
         except Exception:
             pass
         return self._proxy_url, self._auth_session

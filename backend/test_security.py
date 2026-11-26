@@ -63,7 +63,7 @@ class SecurityTests(unittest.TestCase):
         response.status_code = 200
         with patch('backend.security.validate_url') as validate, patch.object(requests.Session, 'request', return_value=response) as send:
             session.get('https://storage.example.org/x')
-            validate.assert_called_once_with('https://storage.example.org/x')
+            validate.assert_called_once_with('https://storage.example.org/x', issued_by_proxy=False)
             self.assertIsNone(send.call_args.kwargs['headers']['Authorization'])
             self.assertFalse(send.call_args.kwargs['allow_redirects'])
         self.assertFalse(session.trust_env)

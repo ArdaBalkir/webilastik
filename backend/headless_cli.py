@@ -140,7 +140,7 @@ def _dp_put(url: str, data: bytes, token: str) -> None:
     r1.raise_for_status()
     presigned = r1.json()["url"]
     logger.info("  [upload] step-2 PUT %s bytes", f"{len(data):,}")
-    r2 = requests.put(presigned, data=data, timeout=300)
+    r2 = requests.put_presigned(presigned, data=data, timeout=300)
     r2.raise_for_status()
     logger.info("  [upload] done (%d)", r2.status_code)
 
@@ -315,7 +315,7 @@ def prefetch_sources(
                 )
                 if isinstance(pre, str) and pre.startswith("http"):
                     url = pre
-                    sess = requests.Session()  # no auth for S3
+                    sess = requests.PresignedSession()  # no auth for S3
             except Exception:
                 pass
         tmp_path: Optional[pathlib.Path] = None

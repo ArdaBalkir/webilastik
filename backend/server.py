@@ -245,7 +245,7 @@ def _dp_put(url: str, data: bytes, token: str) -> int:
     r1.raise_for_status()
     presigned = r1.json()["url"]
     logger.info("[dp_put] step-2 PUT %d bytes to S3 pre-signed URL", len(data))
-    r2 = _req.put(presigned, data=data, timeout=120)
+    r2 = _req.put_presigned(presigned, data=data, timeout=120)
     logger.info("[dp_put] step-2 response: %d", r2.status_code)
     r2.raise_for_status()
     return r2.status_code
