@@ -74,8 +74,15 @@ export WI2_GPU_BATCH_TILES=${WI2_GPU_BATCH_TILES:-64}
 # NOTE: as with jusuf_run.sh, compute nodes have no internet — prefetch the
 # DZIPs into PREFETCH_DIR from the login node first (see jusuf_run.sh).
 
+# JSC launch pattern: the GPU is bound per srun step — request it on the step
+# with --gres=gpu:1 and Slurm sets CUDA_VISIBLE_DEVICES for that step. CPU
+# steps get no GPU. No CUDA module is loaded: cupy/cuml bring their own CUDA
+# runtime from conda and only need the node's driver. (--cuda-mps is only for
+# several ranks sharing a GPU; this is one process.)
 run_pipeline() {
-    srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} --overlap -u \
+    local gres=""
+    if [ "$1" = gpu ]; then gres="--gres=gpu:1"; fi
+    srun --ntasks=1 --cpus-per-task=${SLURM_CPUS_PER_TASK} ${gres} --overlap -u \
         python -m backend.headless_cli run \
             --annotations "${ANNOTATIONS}" \
             --p-source    "${P_SOURCE}" \
@@ -89,13 +96,14 @@ run_pipeline() {
 # Exit codes are handled explicitly; conda activation isn't nounset-safe.
 set +eu
 EXIT_CODE=3
-if conda activate "${GPU_ENV}"; then
-    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \
-        | sed 's/^/[wi2] GPU: /' || echo "[wi2] nvidia-smi failed"
+if ! conda activate "${GPU_ENV}"; then
+    echo "[wi2] conda env ${GPU_ENV} not available"
+elif ! srun --ntasks=1 --cpus-per-task=1 --gres=gpu:1 --overlap -u \
+        bash -c 'set -o pipefail; echo "[wi2] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | sed "s/^/[wi2] GPU: /"'; then
+    echo "[wi2] no GPU visible in a job step"
+else
     run_pipeline gpu
     EXIT_CODE=$?
-else
-    echo "[wi2] conda env ${GPU_ENV} not available"
 fi
 
 if [ "${EXIT_CODE}" -eq 3 ]; then

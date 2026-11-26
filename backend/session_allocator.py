@@ -205,14 +205,17 @@ def _build_sbatch_script(
     cpu_env = shlex.quote(HPC_CPU_ENV)
     gpu_env = shlex.quote(HPC_GPU_ENV)
     if device == "gpu":
+        # JSC: the GPU is bound per srun step (Slurm sets CUDA_VISIBLE_DEVICES
+        # for the step's --gres), so check it from a step, not the batch shell.
         run_block = f"""EXIT_CODE=3
-if conda activate {gpu_env}; then
-    nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader \\
-        | sed 's/^/[wi2] GPU: /' || echo "[wi2] nvidia-smi failed"
+if ! conda activate {gpu_env}; then
+    echo "[wi2] conda env {HPC_GPU_ENV} not available"
+elif ! srun --ntasks=1 --cpus-per-task=1 --gres=gpu:1 --overlap -u \\
+        bash -c 'set -o pipefail; echo "[wi2] CUDA_VISIBLE_DEVICES=$CUDA_VISIBLE_DEVICES"; nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader | sed "s/^/[wi2] GPU: /"'; then
+    echo "[wi2] no GPU visible in a job step"
+else
     _wi2_run gpu
     EXIT_CODE=$?
-else
-    echo "[wi2] conda env {HPC_GPU_ENV} not available"
 fi
 if [ "$EXIT_CODE" -eq 3 ]; then
     echo "[wi2] GPU path unusable — falling back to CPU on this node at $(date)"
@@ -277,7 +280,11 @@ printf '%s\\n' {provenance}
 echo "[wi2] =================================================="
 
 _wi2_run() {{
-    srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
+    # GPU steps request the GPU explicitly (JSC pattern: srun --gres=gpu:1);
+    # CPU steps get none, so a CPU fallback never touches the device.
+    local gres=""
+    if [ "$1" = gpu ]; then gres="--gres=gpu:1"; fi
+    srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK $gres --overlap -u \\
         python -m backend.headless_cli run \\
             --annotations "$_ANN" \\
             {t_source_flag} \\

@@ -144,11 +144,16 @@ class SbatchScripts(unittest.TestCase):
         self.assertIn('if [ "$EXIT_CODE" -eq 3 ]', s)
         self.assertIn("conda activate webilastik2-gpu", s)
         self.assertIn("_wi2_run cpu", s)
+        # JSC: GPU bound per step via srun --gres; checked from a step, not the batch shell
+        self.assertIn('if [ "$1" = gpu ]; then gres="--gres=gpu:1"; fi', s)
+        self.assertIn("srun --ntasks=1 --cpus-per-task=1 --gres=gpu:1", s)
+        self.assertIn("set -o pipefail; echo", s)
 
     def test_cpu_script_unchanged_partition(self):
         s = _script("cpu")
         self.assertIn("#SBATCH --partition=batch", s)
-        self.assertNotIn("gres", s)
+        self.assertNotIn("#SBATCH --gres", s)
+        self.assertIn("_wi2_run cpu", s)
         self.assertNotIn("webilastik2-gpu", s)
 
     @unittest.skipUnless(_bash(), "bash not available")
