@@ -16,6 +16,8 @@ from typing import Any, Dict, Optional
 import jwt
 import requests
 
+from .security import Session as SecureSession
+
 logger = logging.getLogger(__name__)
 
 EBRAINS_IAM_JWKS_URL = (
@@ -101,7 +103,7 @@ def is_data_proxy_url(url: str) -> bool:
         return False
 
 
-class DataProxySession(requests.Session):
+class DataProxySession(SecureSession):
     """Never send EBRAINS credentials to another origin, including redirects."""
 
     def send(self, request, **kwargs):

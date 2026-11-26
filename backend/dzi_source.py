@@ -15,7 +15,7 @@ from functools import lru_cache
 from typing import Dict, Optional, Tuple
 
 import numpy as np
-import requests
+from . import security as requests
 from PIL import Image
 
 from .auth import DataProxySession, is_data_proxy_url

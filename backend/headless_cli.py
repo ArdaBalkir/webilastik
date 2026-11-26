@@ -91,7 +91,7 @@ def _make_session(workers: int, token: Optional[str]) -> Any:
     Rule of thumb: pool_connections = ceil(workers / 4) host buckets,
     pool_maxsize = workers + a few spare slots.
     """
-    import requests
+    from . import security as requests
     from requests.adapters import HTTPAdapter
 
     pool_size = workers + 4  # spare slots so burst doesn't discard
@@ -125,12 +125,10 @@ def _dp_normalize(url: str) -> str:
 
 
 def _dp_put(url: str, data: bytes, token: str) -> None:
-    import requests
+    from . import security as requests
 
     canonical = _dp_normalize(url)
-    from .auth import is_data_proxy_url
-    if not is_data_proxy_url(canonical):
-        raise ValueError("Uploads require an HTTPS EBRAINS data-proxy URL")
+    requests.validate_url(canonical, proxy_only=True)
     logger.info("  [upload] step-1 pre-sign: %s", canonical)
     r1 = requests.put(
         canonical,
@@ -147,7 +145,7 @@ def _dp_put(url: str, data: bytes, token: str) -> None:
 
 
 def _list_dzips(dir_url: str, token: Optional[str]) -> list[dict]:
-    import requests
+    from . import security as requests
 
     canonical = _dp_normalize(dir_url.rstrip("/") + "/")
     m = re.match(
@@ -286,7 +284,7 @@ def prefetch_sources(
     Download all source DZIPs in parallel to dest_dir.
     Returns {src_name: local_path}.
     """
-    import requests
+    from . import security as requests
 
     dest_dir.mkdir(parents=True, exist_ok=True)
     results: dict[str, pathlib.Path] = {}
@@ -304,7 +302,7 @@ def prefetch_sources(
         logger.info("  [prefetch] downloading %s ...", name)
         sess = _make_session(4, token)
         # data-proxy: get pre-signed S3 URL first
-        if token and "data-proxy.ebrains.eu" in url:
+        if token and requests.is_data_proxy(url):
             r = sess.get(url + "?redirect=false", timeout=30)
             r.raise_for_status()
             try:
@@ -573,10 +571,10 @@ def build_prediction_dzip(
 
 
 def upload_dzip(dzip_path: pathlib.Path, dest_url: str, token: Optional[str]) -> None:
-    import requests
+    from . import security as requests
 
     data = dzip_path.read_bytes()
-    if token and "data-proxy.ebrains.eu" in dest_url:
+    if token and requests.is_data_proxy(dest_url):
         _dp_put(dest_url, data, token)
     else:
         s = requests.Session()

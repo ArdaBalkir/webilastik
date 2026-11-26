@@ -57,6 +57,7 @@ from fastapi import FastAPI, HTTPException, Header, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
+from .security import workspace_name, validate_url
 from .auth import verify_token, AuthError, get_user_id
 
 logging.basicConfig(
@@ -83,14 +84,19 @@ _jobs: Dict[str, dict] = {}
 # ── Auth ──────────────────────────────────────────────────────────────────────
 
 
-def _auth(authorization: Optional[str]) -> str:
+def _identity(authorization: Optional[str]) -> dict:
     if os.environ.get("DISABLE_AUTH") == "1":
-        return "dev-user"
+        return {"sub": "dev-user", "preferred_username": "dev-user"}
     try:
         payload = verify_token(authorization)
-        return get_user_id(payload)
+        get_user_id(payload)
+        return payload
     except AuthError as e:
         raise HTTPException(401, str(e))
+
+
+def _auth(authorization: Optional[str]) -> str:
+    return get_user_id(_identity(authorization))
 
 
 def _raw_token(authorization: Optional[str]) -> Optional[str]:
@@ -116,6 +122,7 @@ def _ssh_cmd(remote_cmd: str) -> List[str]:
         "ssh",
         "-oBatchMode=yes",
         "-oStrictHostKeyChecking=yes",
+        "-oCheckHostIP=yes",
         f"-p{HPC_SSH_PORT}",
         *key_args,
         f"{HPC_USER}@{HPC_HOST}",
@@ -166,17 +173,23 @@ def _build_sbatch_script(
     token: Optional[str],
     cpus: int,
     cache_namespace: str,
-    user_id: str,
-    training_sources: List[str],
+    user_id: str = "dev-user",
+    training_sources: Optional[List[str]] = None,
+    workspace: str = "dev-user",
 ) -> str:
+    if not re.fullmatch(r"[a-zA-Z0-9_-]+", workspace) or not re.fullmatch(r"[a-zA-Z0-9_-]+", job_id):
+        raise ValueError("Invalid workspace or job identifier")
+    if not re.fullmatch(r"[a-zA-Z0-9_/-]+", cache_namespace) or ".." in cache_namespace:
+        raise ValueError("Invalid cache namespace")
     provenance = shlex.quote(json.dumps({
         "job_id": job_id, "user_id": user_id,
-        "p_source": p_source, "training_sources": training_sources,
+        "p_source": p_source, "training_sources": training_sources or [],
     }, ensure_ascii=True))
     level_flag = f"--level {level}" if level is not None else ""
     t_source_flag = f"--t-source {shlex.quote(t_source)}" if t_source else ""
     token_export = f"export WI2_TOKEN={shlex.quote(token)}" if token else "# no token"
     token_flag = "--token-env WI2_TOKEN" if token else ""
+    allowed_hosts = shlex.quote(os.environ.get("WI2_ALLOWED_HTTP_HOSTS", ""))
 
     return f"""#!/bin/bash
 #SBATCH --job-name=wi2-run
@@ -186,8 +199,8 @@ def _build_sbatch_script(
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task={cpus}
 #SBATCH --time=02:00:00
-#SBATCH --output=/p/scratch/ebrains-0000003/wi2-run-%j.log
-#SBATCH --error=/p/scratch/ebrains-0000003/wi2-run-%j.log
+#SBATCH --output=/p/scratch/ebrains-0000003/wi2_users/{workspace}/logs/wi2-run-%j.log
+#SBATCH --error=/p/scratch/ebrains-0000003/wi2_users/{workspace}/logs/wi2-run-%j.log
 
 jutil env activate -p ebrains-0000003
 
@@ -200,6 +213,7 @@ conda activate webilastik2
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH=/p/project1/ebrains-0000003/webilastik
+export WI2_ALLOWED_HTTP_HOSTS={allowed_hosts}
 export SRUN_CPUS_PER_TASK=$SLURM_CPUS_PER_TASK
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 export MKL_NUM_THREADS=$SLURM_CPUS_PER_TASK
@@ -207,14 +221,16 @@ export NUMEXPR_MAX_THREADS=$SLURM_CPUS_PER_TASK
 {token_export}
 
 # Write annotations to scratch (avoids E2BIG on srun arg list)
-_ANN=/p/scratch/ebrains-0000003/wi2_ann_{job_id}.json
+_ANN=/p/scratch/ebrains-0000003/wi2_users/{workspace}/wi2_ann_{job_id}.json
 echo '{annotations_b64}' | base64 -d > "$_ANN"
 trap 'rm -f "$_ANN"' EXIT
 
 echo "[wi2] =================================================="
 echo "[wi2] Job {job_id} starting on $(hostname) at $(date)"
 echo "[wi2] SLURM CPUs: $SLURM_CPUS_PER_TASK"
-printf '%s\n' {provenance}
+printf '%s\\n' {shlex.quote("[wi2] p_source: " + p_source)}
+printf '%s\\n' {shlex.quote("[wi2] output_dir: " + output_dir)}
+printf '%s\\n' {provenance}
 echo "[wi2] =================================================="
 
 srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
@@ -226,7 +242,7 @@ srun --ntasks=1 --cpus-per-task=$SLURM_CPUS_PER_TASK --overlap -u \\
         --features {shlex.quote(features_json)} \\
         {level_flag} \\
         {token_flag} \\
-        --prefetch-dir /p/scratch/ebrains-0000003/wi2_cache/{cache_namespace} \\
+        --prefetch-dir /p/scratch/ebrains-0000003/wi2_users/{workspace}/cache/{cache_namespace} \\
         --workers $SLURM_CPUS_PER_TASK
 
 EXIT_CODE=$?
@@ -339,13 +355,23 @@ async def create_headless_job(
     req: HeadlessJobRequest,
     authorization: Optional[str] = Header(default=None),
 ):
-    user_id = _auth(authorization)
+    identity = _identity(authorization)
+    user_id = get_user_id(identity)
+    workspace = workspace_name(identity)
+    validate_url(req.p_source, proxy_only=True)
+    validate_url(req.output_dir, proxy_only=True)
+    if req.t_source:
+        for source in req.t_source.split(","):
+            validate_url(source.strip())
+    for annotation in req.annotations:
+        if annotation.get("dzip_url"):
+            validate_url(annotation["dzip_url"])
     token = _raw_token(authorization)
-    training_sources = sorted({req.t_source} if req.t_source else {
+    training_sources = sorted({s.strip() for s in req.t_source.split(",") if s.strip()} if req.t_source else {
         ann["dzip_url"] for ann in req.annotations
         if isinstance(ann.get("dzip_url"), str)
     })
-    job_id = str(uuid.uuid4())
+    job_id = workspace + "-" + uuid.uuid4().hex
 
     ann_b64 = base64.b64encode(
         json.dumps(req.annotations, separators=(",", ":")).encode()
@@ -365,11 +391,13 @@ async def create_headless_job(
         token=token,
         cpus=req.cpus or HPC_CPUS,
         cache_namespace=_cache_namespace(user_id, req.p_source),
+        workspace=workspace,
         user_id=user_id,
         training_sources=training_sources,
     )
 
     try:
+        await _ssh_run(f"umask 077; mkdir -p /p/scratch/ebrains-0000003/wi2_users/{workspace}/logs")
         raw = await _ssh_run("sbatch --parsable", stdin=script)
     except RuntimeError as e:
         logger.error("sbatch failed for job %s: %s", job_id, e)
@@ -377,13 +405,14 @@ async def create_headless_job(
 
     slurm_job_id = raw.split(";")[0].strip()
     if not re.fullmatch(r"[0-9]+", slurm_job_id):
-        raise HTTPException(502, "Scheduler returned an invalid job ID")
-    log_path = f"/p/scratch/ebrains-0000003/wi2-run-{slurm_job_id}.log"
+        raise HTTPException(502, "Invalid scheduler response")
+    log_path = f"/p/scratch/ebrains-0000003/wi2_users/{workspace}/logs/wi2-run-{slurm_job_id}.log"
     logger.info("Job %s → SLURM %s (user %s)", job_id, slurm_job_id, user_id)
 
     _jobs[job_id] = {
         "job_id": job_id,
         "user_id": user_id,
+        "workspace": workspace,
         "slurm_job_id": slurm_job_id,
         "slurm_state": "PENDING",
         "status": "pending",
