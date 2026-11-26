@@ -3,8 +3,6 @@ Feature extraction for pixel classification.
 
 Primary backend: fastfilters (fast Gaussian-family convolutions, C extension).
 Fallback: scipy.ndimage (pure Python/C, slightly slower but always available).
-GPU: cupyx.scipy.ndimage with the scipy formulas, used for both training and
-prediction once ``device.configure`` selected the GPU.
 
 All public functions work on (H, W, C) uint8 or float32 numpy arrays and
 return (H*W, num_features) float32.
@@ -53,12 +51,6 @@ def extract_features(
     -------
     (H*W, num_features) float32 array
     """
-    from . import device
-
-    if device.use_gpu_features():
-        ndi, xp = gpu_backend()
-        return xp.asnumpy(extract_features_device(tile, filters, scales, ndi, xp))
-
     if tile.ndim == 2:
         tile = tile[:, :, np.newaxis]
     h, w, c = tile.shape
@@ -113,32 +105,27 @@ def _ff_apply(plane: np.ndarray, name: str, scale: float) -> np.ndarray:
     raise ValueError(f"Unknown filter: {name!r}")
 
 
-# ── scipy / CuPy backend ──────────────────────────────────────────────────────
-# One implementation for both: ``ndi``/``xp`` are scipy.ndimage/numpy on CPU or
-# cupyx.scipy.ndimage/cupy on GPU, so training and prediction see the same math.
+# ── scipy fallback ────────────────────────────────────────────────────────────
 
 
 def _scipy_apply(plane: np.ndarray, name: str, scale: float) -> np.ndarray:
-    return _nd_apply(plane, name, scale, _ndi, np)
-
-
-def _nd_apply(plane, name: str, scale: float, ndi, xp):
+    ndi = _ndi
     if name == "gaussianSmoothing":
-        return ndi.gaussian_filter(plane, scale).astype(xp.float32)
+        return ndi.gaussian_filter(plane, scale).astype(np.float32)
 
     if name == "laplacianOfGaussian":
         sm = ndi.gaussian_filter(plane, scale)
-        return ndi.laplace(sm).astype(xp.float32)
+        return ndi.laplace(sm).astype(np.float32)
 
     if name == "gaussianGradientMagnitude":
         gy = ndi.gaussian_filter(plane, scale, order=[1, 0])
         gx = ndi.gaussian_filter(plane, scale, order=[0, 1])
-        return xp.sqrt(gx**2 + gy**2).astype(xp.float32)
+        return np.sqrt(gx**2 + gy**2).astype(np.float32)
 
     if name == "differenceOfGaussians":
         s1 = ndi.gaussian_filter(plane, scale)
         s2 = ndi.gaussian_filter(plane, scale * 0.66)
-        return (s1 - s2).astype(xp.float32)
+        return (s1 - s2).astype(np.float32)
 
     if name == "structureTensorEigenvalues":
         gy = ndi.gaussian_filter(plane, scale, order=[1, 0])
@@ -147,57 +134,20 @@ def _nd_apply(plane, name: str, scale: float, ndi, xp):
         Ixx = ndi.gaussian_filter(gx * gx, inner)
         Ixy = ndi.gaussian_filter(gx * gy, inner)
         Iyy = ndi.gaussian_filter(gy * gy, inner)
-        disc = xp.sqrt(xp.maximum(0.0, (Ixx - Iyy) ** 2 / 4 + Ixy**2))
+        disc = np.sqrt(np.maximum(0.0, (Ixx - Iyy) ** 2 / 4 + Ixy**2))
         mean = (Ixx + Iyy) / 2
-        lam1 = (mean + disc).astype(xp.float32)
-        lam2 = (mean - disc).astype(xp.float32)
-        return xp.stack([lam1, lam2], axis=-1)
+        lam1 = (mean + disc).astype(np.float32)
+        lam2 = (mean - disc).astype(np.float32)
+        return np.stack([lam1, lam2], axis=-1)
 
     if name == "hessianOfGaussianEigenvalues":
         Hxx = ndi.gaussian_filter(plane, scale, order=[2, 0])
         Hxy = ndi.gaussian_filter(plane, scale, order=[1, 1])
         Hyy = ndi.gaussian_filter(plane, scale, order=[0, 2])
-        disc = xp.sqrt(xp.maximum(0.0, (Hxx - Hyy) ** 2 / 4 + Hxy**2))
+        disc = np.sqrt(np.maximum(0.0, (Hxx - Hyy) ** 2 / 4 + Hxy**2))
         mean = (Hxx + Hyy) / 2
-        lam1 = (mean + disc).astype(xp.float32)
-        lam2 = (mean - disc).astype(xp.float32)
-        return xp.stack([lam1, lam2], axis=-1)
+        lam1 = (mean + disc).astype(np.float32)
+        lam2 = (mean - disc).astype(np.float32)
+        return np.stack([lam1, lam2], axis=-1)
 
     raise ValueError(f"Unknown filter: {name!r}")
-
-
-# ── GPU entry point ───────────────────────────────────────────────────────────
-
-
-def extract_features_device(tile, filters: List[str], scales: List[float], ndi, xp):
-    """
-    Same feature layout as ``extract_features`` computed with an arbitrary
-    ndimage/array backend.  Input and output live on that backend (e.g. a
-    CuPy array stays on the GPU).  Always uses the scipy-style formulas.
-    """
-    if tile.ndim == 2:
-        tile = tile[:, :, None]
-    h, w, c = tile.shape
-    img = xp.asarray(tile).astype(xp.float32)
-    channels = []
-    for ch in range(c):
-        plane = xp.ascontiguousarray(img[:, :, ch])
-        for scale in scales:
-            for filt in filters:
-                result = _nd_apply(plane, filt, scale, ndi, xp)
-                if result.ndim == 2:
-                    channels.append(result)
-                else:
-                    for i in range(result.shape[-1]):
-                        channels.append(result[:, :, i])
-    if not channels:
-        raise ValueError("No feature channels produced — check filters list")
-    return xp.stack(channels, axis=-1).reshape(h * w, -1).astype(xp.float32)
-
-
-def gpu_backend():
-    """Return (ndi, xp) for CuPy. Import lazily so CPU installs never need it."""
-    import cupy  # type: ignore
-    import cupyx.scipy.ndimage as cndi  # type: ignore
-
-    return cndi, cupy

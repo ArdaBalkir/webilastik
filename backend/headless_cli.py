@@ -63,7 +63,6 @@ from typing import Any, Dict, List, Optional
 import numpy as np
 from PIL import Image
 
-from . import device
 from .classifier import Classifier
 from .dzi_source import DzipSource, LocalDzipSource
 from .encoding import encode_prediction_png
@@ -400,107 +399,6 @@ def _mp_predict_tile(col_row: "tuple[int, int]") -> "tuple[int, int, str | None]
         return col, row, str(exc)
 
 
-# ── GPU prediction (single process, batched) ─────────────────────────────────
-# CUDA contexts don't survive fork and one V100 can't host 128 worker contexts,
-# so the GPU path stays in one process: CPU threads decode tiles and encode
-# PNGs while the main thread runs features + RF on the GPU in batches.
-
-
-class GpuFailure(RuntimeError):
-    """A GPU error mid-run. The whole job should be retried on CPU."""
-
-
-_GPU_BATCH_TILES = int(os.environ.get("WI2_GPU_BATCH_TILES", "64"))
-
-
-def _predict_tiles_batched(
-    tile_coords: "list[tuple[int, int]]",
-    load_tile: Any,
-    feat_fn: Any,
-    predict_fn: Any,
-    concat: Any,
-    classes: list,
-    tiles_dir: pathlib.Path,
-    workers: int,
-    batch_tiles: int = _GPU_BATCH_TILES,
-) -> list[str]:
-    """
-    load_tile(col, row) -> (H, W, C) uint8 ndarray or None (missing) [CPU threads]
-    feat_fn(arr)        -> (H*W, F) features on the device          [main thread]
-    concat(list)        -> stacked device features
-    predict_fn(feats)   -> (N, n_classes) float32 host ndarray
-    Returns per-tile error strings. Device errors raise GpuFailure.
-    """
-    total = len(tile_coords)
-    errors: list[str] = []
-    chunks = [tile_coords[i : i + batch_tiles] for i in range(0, total, batch_tiles)]
-    t_start = time.time()
-    done = 0
-
-    def _load(cr: "tuple[int, int]") -> Any:
-        try:
-            return load_tile(*cr)
-        except Exception as e:  # bad tile: record, keep going (same as CPU path)
-            return e
-
-    def _encode(col: int, row: int, proba: np.ndarray) -> None:
-        png = encode_prediction_png(proba, classes)
-        (tiles_dir / f"{col}_{row}.png").write_bytes(png)
-
-    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-        encodes: list = []
-        nxt = [pool.submit(_load, cr) for cr in chunks[0]] if chunks else []
-        for k, chunk in enumerate(chunks):
-            cur = nxt
-            if k + 1 < len(chunks):  # decode the next batch while the GPU works
-                nxt = [pool.submit(_load, cr) for cr in chunks[k + 1]]
-            items = []
-            for (col, row), fut in zip(chunk, cur):
-                arr = fut.result()
-                if isinstance(arr, Exception):
-                    errors.append(f"{col},{row}: {arr}")
-                elif arr is not None:
-                    items.append((col, row, arr))
-            if items:
-                try:
-                    feats = concat([feat_fn(arr) for _, _, arr in items])
-                    proba_all = predict_fn(feats)
-                except Exception as e:
-                    raise GpuFailure(f"GPU prediction failed: {e}") from e
-                off = 0
-                for col, row, arr in items:
-                    h, w = arr.shape[:2]
-                    proba = proba_all[off : off + h * w].reshape(h, w, -1)
-                    off += h * w
-                    encodes.append((col, row, pool.submit(_encode, col, row, proba)))
-            done += len(chunk)
-            if (k + 1) % 4 == 0 or done == total:
-                elapsed = time.time() - t_start
-                rate = done / elapsed if elapsed > 0 else 0
-                eta = (total - done) / rate if rate > 0 else 0
-                logger.info("  tiles %d/%d  %.1f/s  ETA %.0fs  [gpu]", done, total, rate, eta)
-        for col, row, fut in encodes:
-            try:
-                fut.result()
-            except Exception as e:
-                errors.append(f"{col},{row}: {e}")
-    return errors
-
-
-def _gpu_fns(clf: Classifier, filters: list, scales: list) -> tuple:
-    from .features import extract_features_device, gpu_backend
-
-    ndi, xp = gpu_backend()
-
-    def feat_fn(arr: np.ndarray) -> Any:
-        return extract_features_device(arr, filters, scales, ndi, xp)
-
-    def predict_fn(feats: Any) -> np.ndarray:
-        return xp.asnumpy(clf.predict_proba_device(feats))
-
-    return feat_fn, predict_fn, xp.concatenate
-
-
 # ── Prediction / DZIP building ────────────────────────────────────────────────
 
 
@@ -589,41 +487,7 @@ def build_prediction_dzip(
     errors: list[str] = []
     t_start = time.time()
 
-    if clf.use_gpu:
-        assert clf.classes_ is not None
-        if tile_cache is not None:
-            cache = tile_cache
-
-            def load_tile(col: int, row: int) -> Optional[np.ndarray]:
-                raw = cache.get((col, row))
-                if raw is None:
-                    return None
-                img = Image.open(io.BytesIO(raw)).convert("RGB")
-                return np.asarray(img, dtype=np.uint8)
-
-        else:
-
-            def load_tile(col: int, row: int) -> Optional[np.ndarray]:
-                return src.get_tile(dzi_name, level, col, row, meta.format)
-
-        feat_fn, predict_fn, concat = _gpu_fns(clf, filters, scales)
-        logger.info(
-            "  predicting %d tiles on GPU (batches of %d, %d CPU threads)",
-            total,
-            _GPU_BATCH_TILES,
-            workers,
-        )
-        errors = _predict_tiles_batched(
-            tile_coords,
-            load_tile,
-            feat_fn,
-            predict_fn,
-            concat,
-            clf.classes_.tolist(),
-            tiles_dir,
-            workers,
-        )
-    elif tile_cache is not None:
+    if tile_cache is not None:
         # Local mode — ProcessPoolExecutor: each process has its own GIL so
         # numpy/PIL work truly parallelises. Tile cache is copied once per
         # worker process via the initializer (one-time pickling cost).
@@ -817,8 +681,6 @@ def run(
             if _own_prefetch_dir and local_path and local_path.exists():
                 local_path.unlink(missing_ok=True)
                 logger.info("  cleaned %s from workdir", local_path.name)
-        except GpuFailure:
-            raise  # abort: the job script reruns everything on CPU
         except Exception as e:
             logger.error("  ✗ FAILED: %s", e)
             failed.append(src_name)
@@ -1045,13 +907,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         for ann in annotations:
             ann.setdefault("dzip_url", args.t_source)
 
-    try:
-        active = device.configure(args.device)
-    except device.GpuUnavailable as e:
-        logger.error("GPU requested but unavailable: %s", e)
-        return device.GPU_UNAVAILABLE_EXIT
-
-    logger.info("Device:     %s", active)
     logger.info("Workers:    %d", args.workers)
     logger.info("Features:   %s @ scales %s", features["filters"], features["scales"])
     logger.info("p_source:   %s", args.p_source)
@@ -1060,20 +915,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         "Auth:       %s", "token present" if token else "NO TOKEN (public buckets only)"
     )
 
-    try:
-        return _run_from_args(args, annotations, features, token)
-    except Exception as e:
-        if active != "gpu":
-            raise
-        # Any failure while on the GPU (CUDA OOM, driver error, cuML bug, ...)
-        # is reported as "GPU unusable" so the job script can retry on CPU.
-        logger.exception("Run failed on GPU: %s", e)
-        return device.GPU_UNAVAILABLE_EXIT
-
-
-def _run_from_args(
-    args: argparse.Namespace, annotations: list, features: dict, token: Optional[str]
-) -> int:
     return run(
         annotations=annotations,
         features=features,
@@ -1195,14 +1036,6 @@ def main(argv: Optional[list[str]] = None) -> None:
         default=None,
         help="Download all source DZIPs here first, then predict from local disk "
         "(eliminates network bottleneck during prediction — use to benchmark CPU throughput)",
-    )
-    p_run.add_argument(
-        "--device",
-        choices=["auto", "gpu", "cpu"],
-        default="cpu",
-        help="gpu: CuPy + cuML, exit code %d if unusable (job script retries on CPU); "
-        "auto: GPU when usable, else CPU; cpu: never touch the GPU (default)"
-        % device.GPU_UNAVAILABLE_EXIT,
     )
 
     # ── dispatch ──────────────────────────────────────────────────────────────
